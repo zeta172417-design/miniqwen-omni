@@ -1,0 +1,50 @@
+# Python and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+envs/
+
+# IDE / agent-local state
+.DS_Store
+.vscode/
+.idea/
+.cursor/
+.claude/
+.agents/
+.codex/
+.specstory/
+.env
+.env.*
+
+# Training data and dataset caches
+dataset/*.parquet
+dataset/eval_omni/
+dataset/.*/
+dataset/.msc
+dataset/.mv
+dataset/.gitattributes
+
+# Local pretrained models and binary weights
+model/*/
+out/
+checkpoints/
+releases/
+*.safetensors
+*.bin
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# Runtime output and experiment tracking
+.runtime/
+trainer/swanlog/
+swanlog/
+output_audio/
+*.log
+
+# ModelScope resumable-upload metadata
+.ms_upload_cache/

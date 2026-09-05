@@ -1,0 +1,246 @@
+"""
+训练工具函数集合
+"""
+import os
+import glob
+import tempfile
+import shutil
+import random
+import math
+import numpy as np
+import datasets
+import torch
+import torch.distributed as dist
+from torch.utils.data import Sampler
+from transformers import AutoTokenizer, logging as hf_logging
+from model.model_omni import MiniQwenOmni
+    
+
+
+def is_main_process():
+    return not dist.is_initialized() or dist.get_rank() == 0
+
+
+def Logger(content):
+    if is_main_process():
+        print(content)
+
+
+def get_lr(current_step, total_steps, lr):
+    # 与 mmv 保持一致：初始 lr=1.0*base_lr，最终 lr=0.1*base_lr
+    return lr * (0.1 + 0.45 * (1 + math.cos(math.pi * current_step / total_steps)))
+
+
+def init_distributed_mode():
+    if int(os.environ.get("RANK", -1)) == -1:
+        return 0  # 非DDP模式
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    # 明确绑定 rank 和 PPU，避免 ProcessGroup 猜测设备并输出警告。
+    dist.init_process_group(
+        backend="nccl",
+        device_id=torch.device("cuda", local_rank),
+    )
+    return local_rank
+
+
+def setup_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def log_model_params(model, ignore_patterns=['audio_encoder', 'vision_encoder']):
+    def should_count(n): return not any(p in n for p in ignore_patterns)
+    total = sum(p.numel() for n, p in model.named_parameters() if should_count(n)) / 1e6
+    cfg = model.config
+    n_routed = getattr(cfg, 'n_routed_experts', getattr(cfg, 'num_experts', 0))
+    n_active = getattr(cfg, 'num_experts_per_tok', 0)
+    n_shared = getattr(cfg, 'n_shared_experts', 0)
+    expert = sum(p.numel() for n, p in model.named_parameters() if 'mlp.experts.0.' in n and should_count(n)) / 1e6
+    shared_expert = sum(p.numel() for n, p in model.named_parameters() if 'mlp.shared_experts.0.' in n and should_count(n)) / 1e6
+    base = total - (expert * n_routed) - (shared_expert * n_shared)
+    active = base + (expert * n_active) + (shared_expert * n_shared)
+    if active < total: Logger(f'Model Params: {total:.2f}M-A{active:.2f}M')
+    else: Logger(f'Model Params: {total:.2f}M')
+
+
+def load_omni_tokenizer(tokenizer_path):
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, fix_mistral_regex=True)
+    audio_token = '<|audio_pad|>'
+    if tokenizer.encode(audio_token, add_special_tokens=False) != [tokenizer.convert_tokens_to_ids(audio_token)]:
+        tokenizer.add_special_tokens({'additional_special_tokens': [audio_token]})
+    audio_ids = tokenizer.encode(audio_token, add_special_tokens=False)
+    image_ids = tokenizer.encode('<|image_pad|>', add_special_tokens=False)
+    if len(audio_ids) != 1 or len(image_ids) != 1:
+        raise ValueError('Qwen audio/image placeholders must be single tokens')
+    return tokenizer
+
+
+def configure_token_ids(omni_config, tokenizer):
+    if len(tokenizer) > omni_config.vocab_size:
+        raise ValueError(f'tokenizer size {len(tokenizer)} exceeds model vocab {omni_config.vocab_size}')
+    omni_config.audio_ids = tokenizer.encode(omni_config.audio_special_token, add_special_tokens=False)
+    omni_config.image_ids = tokenizer.encode(omni_config.image_special_token, add_special_tokens=False)
+    omni_config.think_end_ids = tokenizer.encode('</think>\n\n', add_special_tokens=False)
+    omni_config.eos_token_id = tokenizer.eos_token_id
+    omni_config.pad_token_id = tokenizer.pad_token_id
+
+
+def init_omni_model(omni_config, from_weight='qwen', tokenizer_path='../model/Qwen3-0.6B', audio_encoder_path='../model/SenseVoiceSmall', vision_model_path='../model/siglip2-base-p32-256-ve', save_dir='../out', device='cuda', freeze_backbone='none', from_resume=0):
+    hf_logging.set_verbosity_error()
+    tokenizer = load_omni_tokenizer(tokenizer_path)
+    configure_token_ids(omni_config, tokenizer)
+    load_path = from_weight if os.path.isdir(from_weight) else tokenizer_path
+    model = MiniQwenOmni.from_pretrained(
+        load_path,
+        config=omni_config,
+        # Keep trainable parameters and AdamW moments in FP32.  BF16 is used
+        # only by autocast during forward/backward; otherwise a 1e-5 Qwen LR is
+        # commonly rounded away when written directly into BF16 parameters.
+        dtype=torch.float32,
+        audio_encoder_path=None,
+        vision_model_path=None,
+    )
+    audio_encoder, audio_processor = MiniQwenOmni.load_sensevoice(audio_encoder_path)
+    vision_encoder, vision_processor = MiniQwenOmni.load_vision(vision_model_path)
+    object.__setattr__(model, 'audio_encoder', audio_encoder)
+    object.__setattr__(model, 'audio_processor', audio_processor)
+    object.__setattr__(model, 'vision_encoder', vision_encoder)
+    object.__setattr__(model, 'vision_processor', vision_processor)
+    Logger(f'已加载模型: {load_path}')
+    
+    # 冻结策略
+    if freeze_backbone == 'all':
+        # 冻结整个主干模型
+        for param in model.model.parameters():
+            param.requires_grad = False
+    elif freeze_backbone == 'last1':
+        # 冻结除了最后1层之外的所有层
+        for param in model.model.parameters():
+            param.requires_grad = False
+        # 打开最后1层
+        if hasattr(model.model, 'layers') and len(model.model.layers) > 0:
+            for param in model.model.layers[-1].parameters():
+                param.requires_grad = True
+    return model.to(device), tokenizer
+
+
+def omni_checkpoint(omni_config, weight='miniqwen_omni', model=None, optimizer=None, epoch=0, step=0, swanlab=None, save_dir='../checkpoints', tokenizer=None, save_optimizer_state=True, **kwargs):
+    root = os.path.join(save_dir, weight)
+    os.makedirs(root, exist_ok=True)
+    if model is not None:
+        from torch.nn.parallel import DistributedDataParallel
+        raw_model = model.module if isinstance(model, DistributedDataParallel) else model
+        raw_model = getattr(raw_model, '_orig_mod', raw_model)
+        checkpoint_dir = os.path.join(root, 'checkpoint')
+        tmp_dir = tempfile.mkdtemp(prefix='.checkpoint-', dir=root)
+        # Save the FP32 master parameters.  Casting them back to BF16 here
+        # would discard low-LR Qwen/Norm updates and make resume non-equivalent
+        # even though forward/backward correctly used BF16 autocast.
+        raw_model.save_pretrained(tmp_dir, safe_serialization=True)
+        if tokenizer is not None:
+            tokenizer.save_pretrained(tmp_dir)
+        swanlab_id = None
+        if swanlab:
+            if hasattr(swanlab, 'get_run'):
+                run = swanlab.get_run()
+                swanlab_id = getattr(run, 'id', None) if run else None
+            else:
+                swanlab_id = getattr(swanlab, 'id', None)
+        
+        resume_data = {
+            'epoch': epoch,
+            'step': step,
+            'world_size': dist.get_world_size() if dist.is_initialized() else 1,
+            'swanlab_id': swanlab_id,
+            'rng_state': {
+                'python': random.getstate(),
+                'numpy': np.random.get_state(),
+                'torch': torch.get_rng_state(),
+                'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            }
+        }
+        if save_optimizer_state and optimizer is not None:
+            resume_data['optimizer'] = optimizer.state_dict()
+        for key, value in kwargs.items():
+            if value is not None:
+                if hasattr(value, 'state_dict'):
+                    if isinstance(value, DistributedDataParallel):
+                        resume_data[key] = value.module.state_dict()
+                    else:
+                        resume_data[key] = value.state_dict()
+                else:
+                    resume_data[key] = value
+        
+        torch.save(resume_data, os.path.join(tmp_dir, 'trainer_state.pt'))
+        previous_dir = os.path.join(root, '.previous-checkpoint')
+        if os.path.exists(previous_dir):
+            shutil.rmtree(previous_dir)
+        if os.path.exists(checkpoint_dir):
+            os.replace(checkpoint_dir, previous_dir)
+        os.replace(tmp_dir, checkpoint_dir)
+        if os.path.exists(previous_dir):
+            shutil.rmtree(previous_dir)
+        Logger(f'已保存 HF checkpoint: {checkpoint_dir}')
+        return checkpoint_dir
+    else:  # 加载模式
+        stable_checkpoint = os.path.join(root, 'checkpoint')
+        checkpoints = [stable_checkpoint] if os.path.isdir(stable_checkpoint) else sorted(glob.glob(os.path.join(root, 'checkpoint-*')))
+        if checkpoints:
+            checkpoint_dir = checkpoints[-1]
+            ckp_data = torch.load(
+                os.path.join(checkpoint_dir, 'trainer_state.pt'),
+                map_location='cpu',
+                weights_only=False,
+            )
+            ckp_data['checkpoint_dir'] = checkpoint_dir
+            saved_ws = ckp_data.get('world_size', 1)
+            current_ws = dist.get_world_size() if dist.is_initialized() else 1
+            if saved_ws != current_ws:
+                ckp_data['step'] = ckp_data['step'] * saved_ws // current_ws
+                Logger(f'GPU数量变化({saved_ws}→{current_ws})，step已自动转换为{ckp_data["step"]}')
+            return ckp_data
+        return None
+
+
+def vlm_collate_fn(batch):
+    input_ids = torch.stack([b[0] for b in batch])
+    labels = torch.stack([b[1] for b in batch])
+    pixel_data = [b[2] for b in batch]
+    if hasattr(pixel_data[0], 'keys'):
+        pixel_values = {k: torch.stack([d[k] for d in pixel_data]) for k in pixel_data[0].keys()}
+    else:
+        pixel_values = torch.stack(pixel_data)
+    return input_ids, labels, pixel_values
+
+
+class SkipBatchSampler(Sampler):
+    def __init__(self, sampler, batch_size, skip_batches=0):
+        self.sampler = sampler
+        self.batch_size = batch_size
+        self.skip_batches = skip_batches
+    
+    def __iter__(self):
+        batch = []
+        skipped = 0
+        for idx in self.sampler:
+            batch.append(idx)
+            if len(batch) == self.batch_size:
+                if skipped < self.skip_batches:
+                    skipped += 1
+                    batch = []
+                    continue
+                yield batch
+                batch = []
+        if len(batch) > 0 and skipped >= self.skip_batches:
+            yield batch
+    
+    def __len__(self):
+        total_batches = (len(self.sampler) + self.batch_size - 1) // self.batch_size
+        return max(0, total_batches - self.skip_batches)
