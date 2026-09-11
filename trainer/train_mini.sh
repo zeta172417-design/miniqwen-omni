@@ -13,8 +13,8 @@ export MINIQWEN_DATASET_CACHE=../dataset/.miniqwen_mini_cache
 
 MODEL_PATH=../model/Qwen3-0.6B
 OUTPUT_ROOT=../out
-# Keep this name compatible with the completed T2A mini checkpoint.
-OUTPUT_NAME=miniqwen_omni_mini_validation
+# The same-frame head is format-v5 and must not reuse delayed-head weights.
+OUTPUT_NAME=miniqwen_omni_mini_main_codec_cp_v5
 CHECKPOINT=${OUTPUT_ROOT}/${OUTPUT_NAME}/checkpoint
 PIPELINE_STATE=${OUTPUT_ROOT}/${OUTPUT_NAME}/pipeline_stage
 SWANLAB_PROJECT=MiniQwen-Omni-Mini
@@ -26,8 +26,8 @@ MINI_STOP_AFTER_STAGE="${MINI_STOP_AFTER_STAGE:-2}"
 mkdir -p "${OUTPUT_ROOT}/${OUTPUT_NAME}"
 mkdir -p "${LOG_ROOT}"
 
-# Stage 0 was already used by the completed T2A mini run. If pipeline_stage
-# does not exist yet, recover the completed stage from its trainer_state.
+# If pipeline_stage does not exist yet, recover a completed stage from the
+# format-v5 checkpoint's trainer_state.
 COMPLETED_STAGE=-1
 if [[ -f "${PIPELINE_STATE}" ]]; then
   read -r COMPLETED_STAGE < "${PIPELINE_STATE}"
@@ -57,6 +57,14 @@ COMMON_ARGS=(
   --num_talker_hidden_layers 6
   --talker_hidden_size 768
   --accept_hidden_layer 14
+  --audio_head_type main_codec_predictor
+  --code_predictor_num_layers 2
+  --code_predictor_hidden_size 768
+  --residual_codec_loss_weight 0.3
+  --use_mrope 1
+  --use_modality_boundaries 1
+  --use_talker_ref_boundaries 1
+  --max_images 4
   --dtype bfloat16
   --use_moe 0
   --use_compile 0

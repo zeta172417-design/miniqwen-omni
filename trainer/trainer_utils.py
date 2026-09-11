@@ -2,6 +2,7 @@
 训练工具函数集合
 """
 import os
+import json
 import glob
 import tempfile
 import shutil
@@ -72,13 +73,29 @@ def log_model_params(model, ignore_patterns=['audio_encoder', 'vision_encoder'])
 
 def load_omni_tokenizer(tokenizer_path):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, fix_mistral_regex=True)
-    audio_token = '<|audio_pad|>'
-    if tokenizer.encode(audio_token, add_special_tokens=False) != [tokenizer.convert_tokens_to_ids(audio_token)]:
-        tokenizer.add_special_tokens({'additional_special_tokens': [audio_token]})
-    audio_ids = tokenizer.encode(audio_token, add_special_tokens=False)
+    # Never replace Qwen's existing additional_special_tokens. Replacing the
+    # list makes vision/chat controls stop participating in skip-special-token
+    # handling after the tokenizer is saved.
+    required_special_tokens = [
+        '<|im_start|>', '<|im_end|>',
+        '<|object_ref_start|>', '<|object_ref_end|>',
+        '<|box_start|>', '<|box_end|>', '<|quad_start|>', '<|quad_end|>',
+        '<|vision_start|>', '<|vision_end|>', '<|vision_pad|>',
+        '<|image_pad|>', '<|video_pad|>',
+        # Keep audio_pad first so existing MiniQwen checkpoints retain ID
+        # 151669; the two new boundaries consume subsequent reserved rows.
+        '<|audio_pad|>', '<|audio_start|>', '<|audio_end|>',
+    ]
+    tokenizer.add_special_tokens(
+        {'additional_special_tokens': required_special_tokens},
+        replace_additional_special_tokens=False,
+    )
+    audio_ids = tokenizer.encode('<|audio_pad|>', add_special_tokens=False)
     image_ids = tokenizer.encode('<|image_pad|>', add_special_tokens=False)
-    if len(audio_ids) != 1 or len(image_ids) != 1:
-        raise ValueError('Qwen audio/image placeholders must be single tokens')
+    for token in required_special_tokens:
+        ids = tokenizer.encode(token, add_special_tokens=False)
+        if len(ids) != 1 or ids[0] != tokenizer.convert_tokens_to_ids(token):
+            raise ValueError(f'Qwen special token must encode to one token: {token} -> {ids}')
     return tokenizer
 
 
@@ -86,10 +103,40 @@ def configure_token_ids(omni_config, tokenizer):
     if len(tokenizer) > omni_config.vocab_size:
         raise ValueError(f'tokenizer size {len(tokenizer)} exceeds model vocab {omni_config.vocab_size}')
     omni_config.audio_ids = tokenizer.encode(omni_config.audio_special_token, add_special_tokens=False)
+    omni_config.audio_start_ids = tokenizer.encode(omni_config.audio_start_special_token, add_special_tokens=False)
+    omni_config.audio_end_ids = tokenizer.encode(omni_config.audio_end_special_token, add_special_tokens=False)
     omni_config.image_ids = tokenizer.encode(omni_config.image_special_token, add_special_tokens=False)
+    omni_config.vision_start_ids = tokenizer.encode(omni_config.vision_start_special_token, add_special_tokens=False)
+    omni_config.vision_end_ids = tokenizer.encode(omni_config.vision_end_special_token, add_special_tokens=False)
     omni_config.think_end_ids = tokenizer.encode('</think>\n\n', add_special_tokens=False)
     omni_config.eos_token_id = tokenizer.eos_token_id
     omni_config.pad_token_id = tokenizer.pad_token_id
+
+    configured = {
+        'audio': omni_config.audio_ids,
+        'audio_start': omni_config.audio_start_ids,
+        'audio_end': omni_config.audio_end_ids,
+        'image': omni_config.image_ids,
+        'vision_start': omni_config.vision_start_ids,
+        'vision_end': omni_config.vision_end_ids,
+    }
+    invalid = {name: ids for name, ids in configured.items() if len(ids) != 1}
+    if invalid:
+        raise ValueError(f'modality control tokens must each encode to one token: {invalid}')
+
+
+def format_audio_prompt(config, length):
+    payload = config.audio_special_token * int(length)
+    if getattr(config, 'use_modality_boundaries', False):
+        return config.audio_start_special_token + payload + config.audio_end_special_token
+    return payload
+
+
+def format_image_prompt(config, count=1):
+    payload = config.image_special_token * config.image_token_len
+    if getattr(config, 'use_modality_boundaries', False):
+        payload = config.vision_start_special_token + payload + config.vision_end_special_token
+    return payload * int(count)
 
 
 def init_omni_model(omni_config, from_weight='qwen', tokenizer_path='../model/Qwen3-0.6B', audio_encoder_path='../model/SenseVoiceSmall', vision_model_path='../model/siglip2-base-p32-256-ve', save_dir='../out', device='cuda', freeze_backbone='none', from_resume=0):
@@ -97,6 +144,18 @@ def init_omni_model(omni_config, from_weight='qwen', tokenizer_path='../model/Qw
     tokenizer = load_omni_tokenizer(tokenizer_path)
     configure_token_ids(omni_config, tokenizer)
     load_path = from_weight if os.path.isdir(from_weight) else tokenizer_path
+    saved_config_path = os.path.join(load_path, 'config.json')
+    if os.path.isfile(saved_config_path):
+        with open(saved_config_path, encoding='utf-8') as handle:
+            saved_config = json.load(handle)
+        if saved_config.get('model_type') == 'miniqwen-omni':
+            saved_head = saved_config.get('audio_head_type', 'legacy_parallel_delay')
+            if saved_head != omni_config.audio_head_type:
+                raise ValueError(
+                    f'checkpoint audio_head_type={saved_head} is incompatible with '
+                    f'configured {omni_config.audio_head_type}; start the new head from Qwen3 '
+                    f'or select the matching legacy branch explicitly'
+                )
     model = MiniQwenOmni.from_pretrained(
         load_path,
         config=omni_config,

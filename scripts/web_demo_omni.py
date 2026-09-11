@@ -1,331 +1,763 @@
-import os
-import sys
+"""Password-protected MiniQwen-Omni Gradio inference server."""
 
-__package__ = "scripts"
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from __future__ import annotations
+
 import argparse
-import io
-import tempfile
-import warnings
-import logging
 import contextlib
+import io
+import logging
+import os
+import secrets
+import sys
+import time
+import warnings
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Lock, Thread
+from typing import Any
+
+import gradio as gr
 import librosa
-import soundfile as sf
 import numpy as np
 import torch
-import gradio as gr
-from threading import Thread, Lock
 from PIL import Image
-from pydub import AudioSegment
-from transformers import AutoTokenizer, AutoModelForCausalLM, MimiModel
-from model.model_omni import MiniQwenOmni
-from trainer.trainer_utils import setup_seed, log_model_params
-logging.getLogger().setLevel(logging.ERROR)
-with contextlib.redirect_stdout(io.StringIO()):
-    from funasr import AutoModel
-    from funasr.utils.postprocess_utils import rich_transcription_postprocess
+from transformers import MimiModel
 
-warnings.filterwarnings('ignore')
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
-model_lock = Lock()
+from model.model_omni import MiniQwenOmni  # noqa: E402
+from trainer.trainer_utils import (  # noqa: E402
+    configure_token_ids,
+    format_audio_prompt,
+    format_image_prompt,
+    load_omni_tokenizer,
+)
 
-model, tokenizer, device, mimi_model, asr_model = None, None, None, None, None
-voices_data = {}
-builtin_voices, clone_voices = set(), set()
-
-
-def default_device():
-    if torch.cuda.is_available():
-        return 'cuda'
-    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        return 'mps'
-    return 'cpu'
+LOGGER = logging.getLogger("miniqwen.web")
+MODEL_LOCK = Lock()
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
-def resolve_aux_device(value, fallback):
-    if value and value != 'auto':
-        return value
-    return fallback
+@dataclass
+class Runtime:
+    model: Any
+    tokenizer: Any
+    mimi_model: Any
+    asr_model: Any
+    voices: dict[str, dict[str, torch.Tensor]]
+    device: str
+    dtype: torch.dtype
+    max_audio_seconds: float
 
 
-def get_device_type(value):
-    return torch.device(value).type
-
-
-def normalize_audio(samples, sr, target_sr=16000):
-    if len(samples.shape) > 1:
+def normalize_audio(samples: np.ndarray, sample_rate: int, target_rate: int = 16000) -> np.ndarray:
+    samples = np.asarray(samples)
+    if samples.ndim == 2:
         samples = samples.mean(axis=1)
+    if samples.ndim != 1 or samples.size == 0:
+        raise ValueError("音频为空或格式无效")
     if np.issubdtype(samples.dtype, np.integer):
-        max_value = max(abs(np.iinfo(samples.dtype).min), np.iinfo(samples.dtype).max)
-        samples = samples.astype(np.float32) / max_value
+        limit = max(abs(np.iinfo(samples.dtype).min), np.iinfo(samples.dtype).max)
+        samples = samples.astype(np.float32) / limit
     else:
         samples = samples.astype(np.float32)
-        peak = np.abs(samples).max() if samples.size else 0
-        if peak > 1.0:
-            samples = samples / peak
-    if sr != target_sr:
-        samples = librosa.resample(samples.astype(float), orig_sr=sr, target_sr=target_sr).astype(np.float32)
+    if not np.isfinite(samples).all():
+        raise ValueError("音频包含 NaN 或 Inf")
+    peak = float(np.abs(samples).max())
+    if peak > 1.0:
+        samples /= peak
+    if sample_rate != target_rate:
+        samples = librosa.resample(samples, orig_sr=sample_rate, target_sr=target_rate)
     return np.ascontiguousarray(samples, dtype=np.float32)
 
 
-def frames_to_mimi(frames):
-    codes = [f for f in frames if f and len(f) == 8]
-    if not codes:
+def file_path(value: Any) -> str | None:
+    if value is None:
         return None
-    return torch.tensor(codes, dtype=torch.long).T.unsqueeze(0)
+    if isinstance(value, (str, Path)):
+        return str(value)
+    if isinstance(value, dict):
+        return value.get("path") or value.get("name")
+    return getattr(value, "path", None) or getattr(value, "name", None)
 
 
-def decode_mimi(mimi_codes):
-    if mimi_codes is None or mimi_codes.numel() == 0:
+def first_image(message: Any) -> str | None:
+    if not isinstance(message, dict):
         return None
-    filtered = torch.where(mimi_codes >= 2049, torch.zeros_like(mimi_codes), mimi_codes).to(next(mimi_model.parameters()).device)
-    with torch.no_grad():
-        audio = mimi_model.decode(filtered).audio_values
-    return audio.squeeze().float().cpu().numpy()
+    for value in message.get("files") or []:
+        path = file_path(value)
+        if path and Path(path).suffix.lower() in IMAGE_SUFFIXES:
+            return path
+    return None
 
 
-def scan_hf_models(base_dir):
-    models = {}
-    base_dir = os.path.abspath(base_dir)
-    for d in sorted(os.listdir(base_dir), reverse=True):
-        full_path = os.path.join(base_dir, d)
-        if not os.path.isdir(full_path) or d.startswith('.') or d.startswith('_'):
+def frames_to_mimi(frames: list[list[int]]) -> torch.Tensor | None:
+    complete = [frame for frame in frames if frame and len(frame) == 8]
+    if not complete:
+        return None
+    return torch.tensor(complete, dtype=torch.long).T.unsqueeze(0)
+
+
+def resolve_dtype(name: str, device: str) -> torch.dtype:
+    if name == "auto":
+        return torch.bfloat16 if torch.device(device).type == "cuda" else torch.float32
+    return {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }[name]
+
+
+def require_dir(path: str, label: str) -> str:
+    resolved = str(Path(path).expanduser().resolve())
+    if not Path(resolved).is_dir():
+        raise FileNotFoundError(f"{label}目录不存在: {resolved}")
+    return resolved
+
+
+def load_voices() -> dict[str, dict[str, torch.Tensor]]:
+    result: dict[str, dict[str, torch.Tensor]] = {}
+    voice_dir = PROJECT_ROOT / "model" / "speaker"
+    for filename in ("voices.pt", "voices_unseen.pt"):
+        path = voice_dir / filename
+        if not path.is_file():
             continue
-        files = set(os.listdir(full_path))
-        has_model = bool(files & {'pytorch_model.bin', 'model.safetensors', 'pytorch_model.bin.index.json', 'model.safetensors.index.json'})
-        if has_model:
-            models[d] = full_path
-    return models
+        values = torch.load(path, map_location="cpu")
+        for name, voice in values.items():
+            result.setdefault(name, voice)
+    return result
 
 
-def load_hf_model(model_path):
-    global model, tokenizer
-    with model_lock:
-        [sys.modules.pop(k) for k in list(sys.modules) if 'transformers_modules' in k]
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            audio_encoder_path=None,
-            vision_model_path=None,
-        )
-        vision_encoder, vision_processor = MiniQwenOmni.load_vision(args.vision_model)
-        audio_encoder, audio_processor = MiniQwenOmni.load_sensevoice(args.audio_encoder)
-        object.__setattr__(model, 'vision_encoder', vision_encoder)
-        object.__setattr__(model, 'vision_processor', vision_processor)
-        object.__setattr__(model, 'audio_encoder', audio_encoder)
-        object.__setattr__(model, 'audio_processor', audio_processor)
-        model = model.half().eval().to(device)
-        if model.audio_encoder:
-            model.audio_encoder.to(device)
-        if model.vision_encoder:
-            model.vision_encoder.to(device)
-        name = os.path.basename(model_path)
-        params = sum(p.numel() for p in model.parameters()) / 1e6
-        print(f'已加载 {name}，参数量：{params:.2f}M')
-        return f"已加载: {name} ({params:.2f}M)"
+def load_runtime(args: argparse.Namespace) -> Runtime:
+    model_path = require_dir(args.model_path, "MiniQwen-Omni checkpoint")
+    audio_path = require_dir(args.audio_encoder, "SenseVoice")
+    vision_path = require_dir(args.vision_model, "SigLIP2")
+    mimi_path = require_dir(args.mimi_path, "Mimi")
+    dtype = resolve_dtype(args.dtype, args.device)
+
+    LOGGER.info("Loading MiniQwen-Omni from %s", model_path)
+    tokenizer = load_omni_tokenizer(model_path)
+    # Use the current local implementation so inference fixes do not depend on
+    # the older remote-code snapshot copied into a training checkpoint.
+    model = MiniQwenOmni.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+        dtype=dtype,
+        low_cpu_mem_usage=True,
+        audio_encoder_path=None,
+        vision_model_path=None,
+    )
+    configure_token_ids(model.config, tokenizer)
+
+    audio_encoder, audio_processor = MiniQwenOmni.load_sensevoice(audio_path)
+    vision_encoder, vision_processor = MiniQwenOmni.load_vision(vision_path)
+    # SenseVoice's loader lowers the root logger level globally; restore web logs.
+    logging.getLogger().setLevel(logging.INFO)
+    if audio_encoder is None or audio_processor is None:
+        raise RuntimeError("SenseVoice加载失败，无法处理语音输入")
+    if vision_encoder is None or vision_processor is None:
+        raise RuntimeError("SigLIP2加载失败，无法处理图片输入")
+    object.__setattr__(model, "audio_encoder", audio_encoder)
+    object.__setattr__(model, "audio_processor", audio_processor)
+    object.__setattr__(model, "vision_encoder", vision_encoder)
+    object.__setattr__(model, "vision_processor", vision_processor)
+    model = model.eval().to(args.device)
+    model.audio_encoder.to(args.device)
+    model.vision_encoder.to(args.device)
+
+    LOGGER.info("Loading Mimi from %s", mimi_path)
+    mimi_model = MimiModel.from_pretrained(mimi_path).eval().to(args.device)
+    if torch.device(args.device).type != "cpu":
+        mimi_model = mimi_model.to(dtype=dtype)
+
+    asr_model = None
+    if not args.disable_asr:
+        LOGGER.info("Loading ASR display model on %s", args.asr_device)
+        root_logger = logging.getLogger()
+        previous_level = root_logger.level
+        root_logger.setLevel(logging.ERROR)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                from funasr import AutoModel
+
+                asr_model = AutoModel(
+                    model=audio_path,
+                    trust_remote_code=True,
+                    disable_update=True,
+                    disable_pbar=True,
+                    disable_log=True,
+                    device=args.asr_device,
+                )
+        finally:
+            root_logger.setLevel(previous_level)
+
+    voices = load_voices()
+    parameters = sum(parameter.numel() for parameter in model.parameters())
+    LOGGER.info(
+        "Ready: %.2fM parameters | core=%s | device=%s | voices=%d",
+        parameters / 1e6,
+        dtype,
+        args.device,
+        len(voices),
+    )
+    return Runtime(
+        model=model,
+        tokenizer=tokenizer,
+        mimi_model=mimi_model,
+        asr_model=asr_model,
+        voices=voices,
+        device=args.device,
+        dtype=dtype,
+        max_audio_seconds=args.max_audio_seconds,
+    )
 
 
-def load_voices():
-    global voices_data, builtin_voices, clone_voices
-    voices_data = {}
-    builtin_voices, clone_voices = set(), set()
-    for name, is_builtin in [('voices.pt', True), ('voices_unseen.pt', False)]:
-        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'model', 'speaker', name)
-        if os.path.exists(path):
-            data = torch.load(path, map_location=device)
-            for speaker, v in data.items():
-                if speaker not in voices_data:
-                    voices_data[speaker] = v
-                    (builtin_voices if is_builtin else clone_voices).add(speaker)
+def prepare_audio(runtime: Runtime, audio: tuple[int, np.ndarray] | None):
+    if audio is None:
+        return None, None, None, None
+    sample_rate, raw_samples = audio
+    samples = normalize_audio(raw_samples, int(sample_rate))
+    duration = samples.size / 16000
+    if duration > runtime.max_audio_seconds:
+        raise ValueError(f"语音最长支持 {runtime.max_audio_seconds:g} 秒，当前约 {duration:.1f} 秒")
 
+    inputs = runtime.model.audio_processor(
+        samples,
+        sampling_rate=16000,
+        return_tensors="pt",
+        return_attention_mask=True,
+    )
+    mel = inputs.input_features.squeeze(0).unsqueeze(0).to(runtime.device)
+    valid_len = max(1, int(inputs.attention_mask.sum().item()))
+    audio_lens = torch.tensor([valid_len], device=runtime.device)
 
-def chat_stream(prompt, audio_input=None, image_input=None, voice_name="default", history=None, temperature=0.85, max_tokens=512):
-    audio_inputs, audio_lens, pixel_values, ref_codes, spk_emb = None, None, None, None, None
-    asr_result = [None]
+    asr_state: dict[str, str | None] = {"text": None, "error": None}
     asr_thread = None
+    if runtime.asr_model is not None:
+        def transcribe():
+            try:
+                from funasr.utils.postprocess_utils import rich_transcription_postprocess
 
-    if audio_input is not None:
-        sr, samples = audio_input
-        samples = normalize_audio(samples, sr)
-        inputs = model.audio_processor(samples, sampling_rate=16000, return_tensors="pt", return_attention_mask=True)
-        mel = inputs.input_features.squeeze(0)
-        valid_len = inputs.attention_mask.sum().item()
-        audio_inputs = mel.unsqueeze(0).to(device)
-        audio_lens = torch.tensor([valid_len], device=device)
-        audio_token_len = valid_len or 1
-        prompt = model.config.audio_special_token * audio_token_len
-        samples_for_asr = samples.copy()
-        def _do_asr():
-            r = asr_model.generate(input=samples_for_asr, cache={}, language='auto', use_itn=True)
-            asr_result[0] = rich_transcription_postprocess(r[0]['text']).strip() if r else ''
-            print(f'[ASR] {asr_result[0]}')
-        asr_thread = Thread(target=_do_asr)
+                result = runtime.asr_model.generate(
+                    input=samples.copy(),
+                    cache={},
+                    language="auto",
+                    use_itn=True,
+                    disable_pbar=True,
+                    disable_log=True,
+                )
+                if result:
+                    asr_state["text"] = rich_transcription_postprocess(result[0]["text"]).strip()
+            except Exception as exc:  # ASR is informational and must not break inference.
+                LOGGER.exception("ASR display failed")
+                asr_state["error"] = str(exc)
+
+        asr_thread = Thread(target=transcribe, daemon=True)
         asr_thread.start()
+    asr_task = (asr_thread, asr_state) if asr_thread is not None else None
+    return mel, audio_lens, valid_len, asr_task
 
-    if image_input is not None:
-        image = Image.open(image_input).convert('RGB') if isinstance(image_input, str) else image_input.convert('RGB')
-        pixel_values = {k: v.to(device) for k, v in model.vision_processor(images=image, return_tensors="pt").items()}
-        prompt = (prompt + "\n\n" if prompt else "") + model.config.image_special_token * model.config.image_token_len
 
-    if voice_name != "default" and voice_name in voices_data:
-        v = voices_data[voice_name]
-        ref_codes = v['ref_codes'].unsqueeze(0).to(device)
-        spk_emb = v['spk_emb'].half().unsqueeze(0).to(device) if 'spk_emb' in v else None
+def prepare_image(runtime: Runtime, path: str | None):
+    if path is None:
+        return None
+    with Image.open(path) as source:
+        width, height = source.size
+        if width * height > 40_000_000:
+            raise ValueError("图片像素过大，请上传小于 4000 万像素的图片")
+        image = source.convert("RGB").copy()
+    return {
+        name: value.to(runtime.device)
+        for name, value in runtime.model.vision_processor(images=image, return_tensors="pt").items()
+    }
 
-    messages = (history or []) + [{"role": "user", "content": prompt}]
-    open_thinking = bool(args.open_thinking)
-    inputs_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, open_thinking=open_thinking)
-    x = torch.tensor(tokenizer(inputs_text).data['input_ids'], dtype=torch.long, device=device)[None, ...]
 
-    audio_frames = []
-    with torch.no_grad():
-        with model_lock:
-            res = model.generate(x, tokenizer.eos_token_id, max_new_tokens=max_tokens,
-                                 temperature=temperature, top_p=args.top_p, stream=True,
-                                 return_audio_codes=True, open_thinking=open_thinking,
-                                 audio_inputs=audio_inputs, audio_lens=audio_lens, pixel_values=pixel_values,
-                                 ref_codes=ref_codes, spk_emb=spk_emb)
-            history_idx = 0
-            for y, audio_frame in res:
-                text_chunk = None
-                if y is not None:
-                    answer = tokenizer.decode(y[0].tolist(), skip_special_tokens=True)
-                    if answer and answer[-1] != '�' and len(answer) > history_idx:
-                        text_chunk = answer[history_idx:]
-                        history_idx = len(answer)
-                if audio_frame:
-                    audio_frames.append(audio_frame)
-                yield text_chunk, None, None
+def voice_condition(runtime: Runtime, voice_name: str):
+    if voice_name == "default" or voice_name not in runtime.voices:
+        return None, None
+    voice = runtime.voices[voice_name]
+    ref_codes = voice.get("ref_codes")
+    if ref_codes is not None:
+        ref_codes = ref_codes.unsqueeze(0).to(runtime.device)
+    spk_emb = voice.get("spk_emb")
+    if spk_emb is not None:
+        spk_dtype = next(runtime.model.talker.spk_proj.parameters()).dtype
+        spk_emb = spk_emb.to(device=runtime.device, dtype=spk_dtype).unsqueeze(0)
+    return ref_codes, spk_emb
 
-    if asr_thread:
-        asr_thread.join()
 
-    if audio_frames and mimi_model:
-        yield None, "loading_audio", None
-        mimi_codes = frames_to_mimi(audio_frames)
-        audio_np = decode_mimi(mimi_codes)
-        if audio_np is not None:
-            yield None, (24000, audio_np), asr_result[0]
+def render_input(runtime: Runtime, history: list[dict], prompt: str, max_new_tokens: int, thinking: bool):
+    tokenizer = runtime.tokenizer
+    retained = list(history)
+    while True:
+        messages = retained + [{"role": "user", "content": prompt}]
+        rendered = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=thinking,
+        )
+        token_ids = tokenizer(rendered, add_special_tokens=False).input_ids
+        limit = int(getattr(runtime.model.config, "max_position_embeddings", 40960))
+        if len(token_ids) + max_new_tokens <= limit:
+            tensor = torch.tensor(token_ids, dtype=torch.long, device=runtime.device).unsqueeze(0)
+            return tensor, retained
+        if len(retained) >= 2:
+            retained = retained[2:]
+            continue
+        raise ValueError(f"输入过长：{len(token_ids)} tokens，且至少需要预留 {max_new_tokens} tokens")
+
+
+def decode_audio(runtime: Runtime, frames: list[list[int]]):
+    codes = frames_to_mimi(frames)
+    if codes is None:
+        return None
+    device = next(runtime.mimi_model.parameters()).device
+    codes = torch.where(codes >= 2049, torch.zeros_like(codes), codes).to(device)
+    with torch.inference_mode():
+        audio = runtime.mimi_model.decode(codes).audio_values
+    samples = audio.squeeze().float().cpu().numpy()
+    samples = np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    peak = float(np.abs(samples).max()) if samples.size else 0.0
+    if peak > 0.99:
+        samples *= 0.95 / peak
+    return 24000, np.ascontiguousarray(samples)
+
+
+def stream_answer(
+    runtime: Runtime,
+    text: str,
+    audio,
+    image_path: str | None,
+    history: list[dict],
+    voice_name: str,
+    temperature: float,
+    top_p: float,
+    max_new_tokens: int,
+    thinking: bool,
+    generate_audio: bool,
+):
+    started_at = time.perf_counter()
+    audio_inputs, audio_lens, audio_token_len, asr_task = prepare_audio(runtime, audio)
+    pixel_values = prepare_image(runtime, image_path)
+    prompt_parts = [text.strip()] if text.strip() else []
+    if audio_token_len is not None:
+        prompt_parts.append(format_audio_prompt(runtime.model.config, audio_token_len))
+    if pixel_values is not None:
+        prompt_parts.append(format_image_prompt(runtime.model.config))
+    prompt = "\n\n".join(prompt_parts)
+    input_ids, retained_history = render_input(
+        runtime, history, prompt, max_new_tokens=max_new_tokens, thinking=thinking
+    )
+    ref_codes, spk_emb = voice_condition(runtime, voice_name)
+    newline_ids = runtime.tokenizer.encode("\n", add_special_tokens=False)
+    if len(newline_ids) != 1:
+        raise RuntimeError(f"换行符应编码为一个 token，实际为 {newline_ids}")
+
+    frames: list[list[int]] = []
+    decoded_length = 0
+    first_text_at = None
+    with MODEL_LOCK, torch.inference_mode():
+        generator = runtime.model.generate(
+            input_ids,
+            eos_token_id=runtime.tokenizer.eos_token_id,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=50,
+            rp=1.05,
+            stream=True,
+            use_cache=True,
+            return_audio_codes=generate_audio,
+            open_thinking=thinking,
+            newline_token_id=newline_ids[0],
+            pad_token_id=runtime.tokenizer.pad_token_id,
+            audio_inputs=audio_inputs,
+            audio_lens=audio_lens,
+            pixel_values=pixel_values,
+            ref_codes=ref_codes,
+            spk_emb=spk_emb,
+        )
+        for generated, audio_frame in generator:
+            chunk = None
+            if generated is not None:
+                answer = runtime.tokenizer.decode(generated[0].tolist(), skip_special_tokens=True)
+                if answer and not answer.endswith("�") and len(answer) > decoded_length:
+                    chunk = answer[decoded_length:]
+                    decoded_length = len(answer)
+                    first_text_at = first_text_at or time.perf_counter()
+            if audio_frame:
+                frames.append(audio_frame)
+            yield chunk, None, None, retained_history
+
+    asr_text = None
+    if asr_task is not None:
+        thread, state = asr_task
+        thread.join(timeout=30)
+        asr_text = state["text"]
+    generation_elapsed = time.perf_counter() - started_at
+    if generate_audio and frames:
+        yield None, "decoding", asr_text, retained_history
+        audio_result = decode_audio(runtime, frames)
+        LOGGER.info(
+            "Inference timing: first_text=%.2fs generation=%.2fs total=%.2fs audio_frames=%d",
+            (first_text_at - started_at) if first_text_at else -1,
+            generation_elapsed,
+            time.perf_counter() - started_at,
+            len(frames),
+        )
+        yield None, audio_result, asr_text, retained_history
+    else:
+        LOGGER.info(
+            "Inference timing: first_text=%.2fs total=%.2fs audio=off",
+            (first_text_at - started_at) if first_text_at else -1,
+            time.perf_counter() - started_at,
+        )
+        yield None, None, asr_text, retained_history
+
+
+def build_demo(runtime: Runtime, args: argparse.Namespace) -> gr.Blocks:
+    voice_choices = [("默认音色", "default")] + [(name, name) for name in sorted(runtime.voices)]
+
+    def respond_core(text, audio, image, voice, chat_history, model_history, turns,
+                     temperature, top_p, max_tokens, thinking, response_mode,
+                     request: gr.Request):
+        chat_history = list(chat_history or [])
+        model_history = list(model_history or [])
+        text = str(text or "").strip()
+        image_path = file_path(image)
+        if len(text) > args.max_text_chars:
+            yield chat_history, None, model_history, f"❌ 文本超过 {args.max_text_chars} 字符"
             return
-    yield None, None, asr_result[0]
-
-
-def launch_gradio(server_name="0.0.0.0", server_port=8888):
-    voice_choices = [("default", "default")]
-    for s in sorted(builtin_voices): voice_choices.append((f"[内置] {s}", s))
-    for s in sorted(clone_voices): voice_choices.append((f"[克隆] {s}", s))
-
-    def respond(message, audio, voice, chat_history, model_history, max_turns):
-        text = message.get("text", "") if isinstance(message, dict) else (message or "")
-        files = message.get("files", []) if isinstance(message, dict) else []
-        img_path = next((f for f in files if any(f.lower().endswith(e) for e in ('.png','.jpg','.jpeg','.gif','.bmp','.webp'))), None)
-
-        if not text and audio is None and img_path is None:
-            yield chat_history + [{"role": "assistant", "content": "请输入文本、上传图片或录制音频"}], gr.update(), gr.update(), model_history, ""
+        if not text and audio is None and image_path is None:
+            yield chat_history, None, model_history, "❌ 请先输入文字、选择图片或完成录音"
             return
 
+        if image_path:
+            chat_history.append({"role": "user", "content": {"path": image_path}})
         if audio is not None:
-            sr, samples = audio
-            display_samples = samples.mean(axis=1) if len(samples.shape) > 1 else samples
-            wav_path = tempfile.NamedTemporaryFile(suffix='.wav', delete=False).name
-            sf.write(wav_path, display_samples, sr)
-            chat_history = chat_history + [{"role": "user", "content": {"path": wav_path}}]
-        elif img_path:
-            chat_history = chat_history + [{"role": "user", "content": {"path": img_path}}, {"role": "user", "content": text or "请描述这张图片"}]
+            display = "🎤 已发送一段语音"
+        elif text:
+            display = text
         else:
-            chat_history = chat_history + [{"role": "user", "content": text}]
+            display = "请描述这张图片。"
+        chat_history.append({"role": "user", "content": display})
+        user_message_index = len(chat_history) - 1
+        chat_history.append({"role": "assistant", "content": "正在生成…"})
+        yield chat_history, None, model_history, "⏳ 已收到请求，正在推理"
 
-        response_text = ""
-        final_audio = None
+        response = ""
         asr_text = None
-        chat_history = chat_history + [{"role": "assistant", "content": ""}]
-        yield chat_history, gr.update(value=None), None, model_history, ""
+        final_audio = None
+        last_ui_update = 0.0
+        generate_audio = response_mode == "文本 + 语音"
+        retained = model_history[-int(turns) * 2:] if int(turns) > 0 else []
+        retained_history = retained
+        try:
+            for chunk, audio_result, asr_result, retained_history in stream_answer(
+                runtime=runtime,
+                text=text or ("请描述这张图片。" if image_path and audio is None else ""),
+                audio=audio,
+                image_path=image_path,
+                history=retained,
+                voice_name=voice,
+                temperature=float(temperature),
+                top_p=float(top_p),
+                max_new_tokens=int(max_tokens),
+                thinking=bool(thinking),
+                generate_audio=bool(generate_audio),
+            ):
+                if chunk:
+                    response += chunk
+                    chat_history[-1]["content"] = response
+                    now = time.perf_counter()
+                    if now - last_ui_update >= 0.08:
+                        last_ui_update = now
+                        yield chat_history, None, model_history, "✍️ 正在生成回复"
+                if asr_result:
+                    asr_text = asr_result
+                if audio_result == "decoding":
+                    yield chat_history, None, model_history, "🔊 正在组装语音回复"
+                elif audio_result is not None:
+                    final_audio = audio_result
 
-        hist = model_history[-(max_turns * 2):] if max_turns > 0 else []
-        for text_chunk, audio_data, asr in chat_stream(
-            text or "", audio_input=audio, image_input=img_path,
-            voice_name=voice, history=hist, temperature=0.7, max_tokens=512
-        ):
-            if text_chunk:
-                response_text += text_chunk
-                chat_history[-1]["content"] = response_text
-                yield chat_history, gr.update(), None, model_history, gr.update()
-            if audio_data == "loading_audio":
-                yield chat_history, gr.update(), None, model_history, '<div style="text-align:center;padding:10px 0;color:#aaa;font-size:13px;animation:pulse 1.5s ease-in-out infinite">正在组装语音（受限于 Gradio 特性，此处为非流式解码）...</div>'
-            elif audio_data:
-                final_audio = audio_data
-            if asr is not None:
-                asr_text = asr
+            if not response:
+                response = "（模型没有生成可显示的文本）"
+                chat_history[-1]["content"] = response
+            if audio is not None and asr_text:
+                chat_history[user_message_index]["content"] = "🎤 " + asr_text
+            memory_parts = []
+            if text:
+                memory_parts.append(text)
+            if audio is not None:
+                memory_parts.append("[语音转写] " + (asr_text or "未获得转写"))
+            if image_path:
+                memory_parts.append("[图片]")
+            user_memory = "\n".join(memory_parts) or "多模态输入"
+            model_history = retained_history + [
+                {"role": "user", "content": user_memory},
+                {"role": "assistant", "content": response},
+            ]
+            LOGGER.info("Completed request for user=%s", getattr(request, "username", "unknown"))
+            final_status = (
+                "✅ 完成；若浏览器未自动播放，请点击下方播放器的 ▶"
+                if final_audio is not None else "✅ 文本完成"
+            )
+            yield chat_history, final_audio, model_history, final_status
+        except Exception as exc:
+            LOGGER.exception("Inference failed for user=%s", getattr(request, "username", "unknown"))
+            chat_history[-1]["content"] = f"推理失败：{type(exc).__name__}。请缩短输入后重试。"
+            yield chat_history, None, model_history, "❌ 详细错误已写入服务器日志"
 
-        user_text = asr_text if asr_text else (text or "")
-        if user_text:
-            model_history = model_history + [{"role": "user", "content": user_text}]
-        if response_text:
-            model_history = model_history + [{"role": "assistant", "content": response_text}]
+    def clear_chat():
+        return [], None, [], "已清空对话"
 
-        yield chat_history, final_audio if final_audio else gr.update(), None, model_history, ""
+    def respond_text_image(text, image, voice, chat_history, model_history, turns,
+                           temperature, top_p, max_tokens, thinking, response_mode,
+                           request: gr.Request):
+        LOGGER.info(
+            "Text/image submit for user=%s (text=%s image=%s)",
+            getattr(request, "username", "unknown"),
+            bool(str(text or "").strip()),
+            image is not None,
+        )
+        yield from respond_core(
+            text, None, image, voice, chat_history, model_history, turns,
+            temperature, top_p, max_tokens, thinking, response_mode, request,
+        )
 
-    with gr.Blocks(title="MiniQwen-Omni", js="()=>{new MutationObserver(()=>{const m=document.getElementById('mic-box');if(!m)return;const h=!!m.querySelector('audio');document.body.classList.toggle('has-audio',h);const t=document.querySelector('textarea');if(t){t.placeholder=h?'已加载语音，点击发送':'输入文本';t.disabled=h}}).observe(document.body,{childList:true,subtree:true})}", css=".app{padding-top:6px!important} #component-0{gap:6px!important} #component-1{padding:2px 0!important;margin:0!important;min-height:0!important;border:none!important} #component-1 .padding{padding:0!important} #chatbox img{max-width:120px!important;max-height:120px!important;border-radius:8px} textarea{overflow-y:hidden!important;height:auto!important;min-height:30px!important;max-height:60px!important} #mic-box{max-height:150px!important;overflow:hidden!important} #mic-box .wrap span.or,#mic-box .wrap span:first-child{display:none!important} #mic-box .wrap{font-size:0!important;min-height:40px!important;padding:8px!important} #mic-box .wrap::after{content:'上传/录音';font-size:14px!important} #mic-box .mic-select{display:none!important} .has-audio textarea{opacity:0.4!important;pointer-events:none!important} .has-audio .upload-button,.has-audio [data-testid='upload-button']{display:none!important} @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}") as demo:
-        gr.HTML('<div style="text-align:center;margin:2px 0"><span style="font-size:1.2rem;font-weight:bold;font-style:italic">MiniQwen-Omni</span> <span style="color:#999;font-size:0.8rem">text / image / audio → text + audio</span></div>')
+    def respond_audio(audio, voice, chat_history, model_history, turns, temperature,
+                      top_p, max_tokens, thinking, response_mode, request: gr.Request):
+        LOGGER.info(
+            "Audio submit for user=%s (has_audio=%s)",
+            getattr(request, "username", "unknown"),
+            audio is not None,
+        )
+        yield from respond_core(
+            "", audio, None, voice, chat_history, model_history, turns,
+            temperature, top_p, max_tokens, thinking, response_mode, request,
+        )
 
-        chatbot = gr.Chatbot(label="", height=380, elem_id="chatbox", type="messages")
+    css = """
+    .gradio-container {max-width: 1080px !important; margin: auto !important;}
+    #hero {text-align: center; margin: 0.4rem 0 0.8rem;}
+    #hero h1 {font-size: 1.75rem; margin-bottom: 0.15rem;}
+    #hero p {color: var(--body-text-color-subdued); margin: 0;}
+    #chatbox {border-radius: 16px;}
+    #status {min-height: 28px; text-align: center; font-weight: 600;}
+    .input-card {border: 1px solid var(--border-color-primary); border-radius: 14px; padding: 12px;}
+    """
+    with gr.Blocks(title="MiniQwen-Omni", css=css, theme=gr.themes.Soft()) as demo:
+        gr.HTML(
+            '<div id="hero"><h1>MiniQwen-Omni</h1>'
+            '<p>文本 · 麦克风 · 图片 → 流式文本 + 语音回复</p></div>'
+        )
+        chatbot = gr.Chatbot(
+            type="messages",
+            height=520,
+            elem_id="chatbox",
+            label="对话",
+            placeholder="输入文本，或者上传语音/图片开始体验。",
+            show_copy_button=True,
+            show_share_button=False,
+            allow_file_downloads=False,
+        )
         model_history = gr.State([])
-        audio_status = gr.HTML("", elem_id="audio-status")
-        audio_out = gr.Audio(label="语音回复", autoplay=True, elem_id="audio-out")
+        status = gr.Markdown("模型已就绪", elem_id="status")
+
+        gr.Markdown("### 1. 选择回复形式")
         with gr.Row(equal_height=True):
-            with gr.Column(scale=0, min_width=160):
-                aud = gr.Audio(sources=["upload", "microphone"], type="numpy", show_label=False, elem_id="mic-box")
-            with gr.Column(scale=4):
-                msg = gr.MultimodalTextbox(placeholder="输入文本", show_label=False, submit_btn="发送")
+            response_mode = gr.Radio(
+                [("仅文字（更快）", "快速文本"), ("文字 + 语音", "文本 + 语音")],
+                value="文本 + 语音",
+                label="模型如何回复",
+                scale=2,
+            )
+            voice = gr.Dropdown(
+                voice_choices,
+                value="default",
+                label="语音回复音色",
+                scale=1,
+            )
+
+        gr.Markdown("### 2. 选择一种输入方式并发送")
+        with gr.Tabs():
+            with gr.Tab("文字 / 图片"):
+                gr.Markdown("可以只发文字、只发图片，或者文字和图片一起发送。")
+                with gr.Row(equal_height=True):
+                    text_input = gr.Textbox(
+                        label="文字",
+                        placeholder="在这里输入问题；按 Enter 也可以发送",
+                        lines=4,
+                        max_lines=8,
+                        scale=3,
+                    )
+                    image_in = gr.Image(
+                        sources=["upload", "clipboard"],
+                        type="filepath",
+                        format="webp",
+                        label="图片（可选，建议小于 5 MB）",
+                        height=220,
+                        scale=2,
+                    )
+                with gr.Row():
+                    send_text = gr.Button("发送文字 / 图片", variant="primary")
+                    gr.ClearButton([text_input, image_in], value="清空文字和图片")
+
+            with gr.Tab("语音"):
+                gr.Markdown("① 开始录音　② 停止录音并等待波形出现　③ 点击“发送这段语音”。无需填写文字。")
+                audio_in = gr.Audio(
+                    sources=["microphone", "upload"],
+                    type="numpy",
+                    format="wav",
+                    label=f"录音或上传音频（最长 {runtime.max_audio_seconds:g} 秒）",
+                    max_length=runtime.max_audio_seconds,
+                )
+                with gr.Row():
+                    send_audio = gr.Button("发送这段语音", variant="primary")
+                    gr.ClearButton([audio_in], value="清除录音")
+
+        gr.Markdown("### 3. 模型回复")
+        audio_out = gr.Audio(
+            label="模型语音回复（选择“文字 + 语音”时生成）",
+            autoplay=True,
+            format="wav",
+            show_download_button=True,
+        )
+        with gr.Accordion("高级生成设置", open=False):
+            with gr.Row():
+                turns = gr.Dropdown([0, 2, 4, 6, 8], value=4, label="保留对话轮数")
+                max_tokens = gr.Slider(32, 512, value=128, step=32, label="最大生成 tokens")
+                temperature = gr.Slider(0.1, 1.5, value=0.7, step=0.05, label="Temperature")
+                top_p = gr.Slider(0.1, 1.0, value=0.85, step=0.05, label="Top-p")
+                thinking = gr.Checkbox(value=bool(args.open_thinking), label="启用 thinking")
         with gr.Row():
-            voice_dd = gr.Dropdown(choices=voice_choices, value="default", label="音色选择", scale=0, min_width=140)
-            turns_dd = gr.Dropdown(choices=[0, 2, 4, 6, 8], value=0, label="多轮记忆", scale=0, min_width=120)
-            if model_dict:
-                model_dd = gr.Dropdown(choices=list(model_dict.keys()), value=current_model_name, label="模型选择", scale=1, min_width=180)
-                status = gr.Textbox(value=f"已加载: {current_model_name}", label="状态", interactive=False, scale=2)
-                model_dd.change(lambda n: load_hf_model(model_dict[n]), [model_dd], [status])
+            stop = gr.Button("停止生成", variant="stop")
+            clear = gr.Button("清空对话")
+            gr.Button("退出登录", link="/logout?all_session=false")
 
-        msg.submit(respond, [msg, aud, voice_dd, chatbot, model_history, turns_dd], [chatbot, audio_out, aud, model_history, audio_status])
+        common_inputs = [voice, chatbot, model_history, turns, temperature,
+                         top_p, max_tokens, thinking, response_mode]
+        outputs = [chatbot, audio_out, model_history, status]
+        text_event = send_text.click(
+            respond_text_image,
+            [text_input, image_in, *common_inputs],
+            outputs,
+            api_name="chat",
+            concurrency_id="miniqwen-model",
+            concurrency_limit=1,
+            show_progress="hidden",
+        )
+        enter_event = text_input.submit(
+            respond_text_image,
+            [text_input, image_in, *common_inputs],
+            outputs,
+            api_name=False,
+            concurrency_id="miniqwen-model",
+            concurrency_limit=1,
+            show_progress="hidden",
+        )
+        audio_event = send_audio.click(
+            respond_audio,
+            [audio_in, *common_inputs],
+            outputs,
+            api_name="chat_audio",
+            concurrency_id="miniqwen-model",
+            concurrency_limit=1,
+            show_progress="hidden",
+        )
+        stop.click(
+            lambda: "⏹️ 已请求停止",
+            None,
+            status,
+            cancels=[text_event, enter_event, audio_event],
+            queue=False,
+            api_name=False,
+        )
+        clear.click(clear_chat, None, outputs, queue=False, api_name=False)
+    return demo
 
-    demo.queue().launch(server_name=server_name, server_port=server_port)
+
+def auth_from_environment(args: argparse.Namespace):
+    if args.no_auth:
+        if args.share or args.host not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("--no-auth 仅允许本机监听，不能与 --share 或公网监听一起使用")
+        return None
+    username = os.environ.get("MINIQWEN_WEB_USERNAME", "miniqwen")
+    password = os.environ.get("MINIQWEN_WEB_PASSWORD", "")
+    if len(password) < 8:
+        raise ValueError("请设置至少 8 位的 MINIQWEN_WEB_PASSWORD；密码不会写入仓库")
+
+    def authenticate(candidate_user: str, candidate_password: str) -> bool:
+        return secrets.compare_digest(candidate_user, username) and secrets.compare_digest(
+            candidate_password, password
+        )
+
+    return authenticate
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="MiniQwen-Omni Gradio Demo")
-    parser.add_argument('--load_from', default='./', type=str, help="transformers模型扫描目录")
-    parser.add_argument('--audio_encoder', default='../model/SenseVoiceSmall', type=str)
-    parser.add_argument('--vision_model', default='../model/siglip2-base-p32-256-ve', type=str)
-    parser.add_argument('--mimi_path', default='../model/mimi', type=str)
-    parser.add_argument('--device', default=default_device(), type=str)
-    parser.add_argument('--asr_device', default='auto', type=str, help='ASR设备；auto 在 MPS 主设备下使用 cpu，其它情况跟随 --device')
-    parser.add_argument('--mimi_device', default='auto', type=str, help='Mimi 解码设备；auto 跟随 --device')
-    parser.add_argument('--open_thinking', default=0, type=int, choices=[0, 1])
-    parser.add_argument('--top_p', default=0.85, type=float)
-    parser.add_argument('--port', default=8888, type=int)
-    args = parser.parse_args()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="MiniQwen-Omni password-protected Gradio server")
+    parser.add_argument("--model-path", default=str(PROJECT_ROOT / "out/miniqwen_omni_full/checkpoint"))
+    parser.add_argument("--audio-encoder", default=str(PROJECT_ROOT / "model/SenseVoiceSmall"))
+    parser.add_argument("--vision-model", default=str(PROJECT_ROOT / "model/siglip2-base-p32-256-ve"))
+    parser.add_argument("--mimi-path", default=str(PROJECT_ROOT / "model/mimi"))
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--asr-device", default="cpu")
+    parser.add_argument("--dtype", choices=["auto", "bfloat16", "float16", "float32"], default="bfloat16")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7860)
+    parser.add_argument("--root-path", default=None, help="反向代理子路径，例如 /miniqwen")
+    parser.add_argument("--share", action="store_true", help="创建临时 gradio.live HTTPS 地址")
+    parser.add_argument("--no-auth", action="store_true", help="仅允许 127.0.0.1 本机调试")
+    parser.add_argument("--disable-asr", action="store_true", help="不显示语音输入的 ASR 转写")
+    parser.add_argument("--open-thinking", action="store_true")
+    parser.add_argument("--max-audio-seconds", type=float, default=30.0)
+    parser.add_argument("--max-text-chars", type=int, default=4000)
+    parser.add_argument("--max-upload-mb", type=int, default=20)
+    parser.add_argument("--queue-size", type=int, default=8)
+    parser.add_argument("--ssl-keyfile", default=None)
+    parser.add_argument("--ssl-certfile", default=None)
+    return parser.parse_args()
 
-    device = args.device
-    asr_device = resolve_aux_device(args.asr_device, 'cpu' if get_device_type(device) == 'mps' else device)
-    mimi_device = resolve_aux_device(args.mimi_device, device)
-    model_dict = scan_hf_models(args.load_from)
-    if not model_dict:
-        print(f"未在 {os.path.abspath(args.load_from)} 找到 transformers 模型")
-        exit(1)
-    current_model_name = list(model_dict.keys())[0]
-    load_hf_model(model_dict[current_model_name])
 
-    try:
-        mimi_model = MimiModel.from_pretrained(args.mimi_path).eval().to(mimi_device)
-        if get_device_type(mimi_device) != 'cpu':
-            mimi_model = mimi_model.half()
-        print(f'Mimi model loaded on {mimi_device}')
-    except Exception:
-        mimi_model = None
-        print('Mimi model not found, audio output disabled')
+def main():
+    args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+    warnings.filterwarnings("ignore", message=".*path not found: None.*")
+    if args.max_audio_seconds <= 0 or args.max_text_chars <= 0:
+        raise ValueError("输入长度限制必须大于 0")
+    auth = auth_from_environment(args)
+    runtime = load_runtime(args)
+    demo = build_demo(runtime, args)
+    LOGGER.info("Starting web server on %s:%d (share=%s)", args.host, args.port, args.share)
+    demo.queue(api_open=False, max_size=args.queue_size, default_concurrency_limit=1).launch(
+        server_name=args.host,
+        server_port=args.port,
+        share=args.share,
+        auth=auth,
+        auth_message="MiniQwen-Omni 私有体验服务",
+        show_error=False,
+        show_api=False,
+        quiet=False,
+        max_threads=8,
+        max_file_size=f"{args.max_upload_mb}mb",
+        blocked_paths=[
+            str(PROJECT_ROOT / name)
+            for name in (".git", "dataset", "envs", "model", "out", "releases", "trainer/swanlog")
+        ],
+        root_path=args.root_path,
+        ssl_keyfile=args.ssl_keyfile,
+        ssl_certfile=args.ssl_certfile,
+        enable_monitoring=False,
+        strict_cors=True,
+        state_session_capacity=128,
+    )
 
-    with contextlib.redirect_stdout(io.StringIO()):
-        asr_model = AutoModel(model=args.audio_encoder, trust_remote_code=True, device=asr_device, disable_update=True)
-    load_voices()
-    print(f'Voices loaded: {list(voices_data.keys()) or "none"}')
-    launch_gradio(server_port=args.port)
+
+if __name__ == "__main__":
+    main()

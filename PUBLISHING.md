@@ -4,16 +4,12 @@
 
 ## 1. 发布到私人 GitHub 仓库
 
-当前目录继承了上游 MiniMind-O 的 Git 历史。为了确保旧历史中的二进制文件也不会进入你的私人仓库，不要直接推送当前 `master`。先在本地完成整理 commit，再用 `git archive` 生成无历史的纯代码仓库。
+当前工作目录已连接私人仓库 `zeta172417-design/miniqwen-omni`，默认分支为 `main`，不再配置 MiniMind-O remote。V0 对应第一次上传的代码，V0.1 对应 Main codec head + Code Predictor 基线。
 
-先在 GitHub 网页创建一个空的 private repository，例如 `YOUR_GITHUB_USER/miniqwen-omni`，不要自动添加 README、License 或 `.gitignore`。然后在本项目执行：
+发布后续代码版本时执行：
 
 ```bash
-cd /mnt/workspace/zhaozetao/multimodel/miniqwen-omni
-
-# 这三类文件在上游中曾被跟踪；只从 Git 索引移除，本地文件保留。
-git rm -r --cached --ignore-unmatch dataset/eval_omni model/speaker model/vad
-
+cd /path/to/miniqwen-omni
 git add -A
 git status --short
 
@@ -21,38 +17,29 @@ git status --short
 git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(parquet|safetensors|bin|pth|pt|ckpt|onnx|mp3|wav|jpg|jpeg|png)$' && \
   echo 'ERROR: binary artifact staged' || echo 'OK: code-only staging area'
 
-git commit -m "Prepare MiniQwen-Omni code release"
-
-# 从当前快照创建一个没有上游历史的新仓库。
-rm -rf /tmp/miniqwen-omni-code-release
-mkdir -p /tmp/miniqwen-omni-code-release
-git archive HEAD | tar -x -C /tmp/miniqwen-omni-code-release
-cd /tmp/miniqwen-omni-code-release
-git init -b main
-git add .
-git commit -m "Initial private release of MiniQwen-Omni"
-git remote add origin git@github.com:YOUR_GITHUB_USER/miniqwen-omni.git
+git commit -m "Describe the change"
 git push -u origin main
 ```
 
-如果使用 HTTPS，将最后的 remote 地址改为：
+创建新版本 tag 时：
 
 ```bash
-git remote add origin https://github.com/YOUR_GITHUB_USER/miniqwen-omni.git
+git tag -a v0.2 -m "MiniQwen-Omni V0.2"
+git push origin v0.2
 ```
 
-`git rm --cached` 只修改 Git 索引，不删除本地评测数据或辅助模型。`git archive` 只导出当前 commit 中的文件，因此新 GitHub 仓库不会携带上游历史。
+训练数据、权重、日志、生成媒体和本地密钥均由 `.gitignore` 排除。不要使用 `git add -f` 强制添加这些内容。
 
 ## 2. 导出 ModelScope 模型
 
 不要直接转换或覆盖训练 checkpoint。生成独立 BF16 目录：
 
 ```bash
-cd /mnt/workspace/zhaozetao/multimodel/miniqwen-omni
+cd /path/to/miniqwen-omni
 source envs/Omni-ppu/bin/activate
 
 python scripts/export_modelscope.py \
-  --checkpoint out/miniqwen_omni_full/checkpoint \
+  --checkpoint out/miniqwen_omni_full_main_codec_cp_v5/checkpoint \
   --output releases/miniqwen-omni-bf16
 ```
 

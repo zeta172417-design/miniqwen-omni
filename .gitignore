@@ -16,11 +16,13 @@ envs/
 .agents/
 .codex/
 .specstory/
+.gradio/
 .env
 .env.*
 
 # Training data and dataset caches
 dataset/*.parquet
+dataset/arch_eval/
 dataset/eval_omni/
 dataset/.*/
 dataset/.msc

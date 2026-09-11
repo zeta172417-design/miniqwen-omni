@@ -22,7 +22,9 @@ export MINIQWEN_DATASET_CACHE=../dataset/.miniqwen_training_cache
 #   - training metrics are recorded with SwanLab.
 
 MODEL_PATH=../model/Qwen3-0.6B
-OUTPUT_NAME=miniqwen_omni_full
+# Format-v5 uses the same-frame Main+Code-Predictor architecture and starts
+# from Qwen rather than reusing delayed-head checkpoints.
+OUTPUT_NAME=miniqwen_omni_full_main_codec_cp_v5
 OUTPUT_ROOT=../out
 CHECKPOINT=${OUTPUT_ROOT}/${OUTPUT_NAME}/checkpoint
 SWANLAB_PROJECT=MiniQwen-Omni-Full
@@ -54,6 +56,14 @@ COMMON_ARGS=(
   --num_talker_hidden_layers 6
   --talker_hidden_size 768
   --accept_hidden_layer 14
+  --audio_head_type main_codec_predictor
+  --code_predictor_num_layers 2
+  --code_predictor_hidden_size 768
+  --residual_codec_loss_weight 0.3
+  --use_mrope 1
+  --use_modality_boundaries 1
+  --use_talker_ref_boundaries 1
+  --max_images 4
   --use_moe 0
   --use_compile 0
   --gradient_checkpointing 0
@@ -133,7 +143,7 @@ run_stage 5 29564 \
   --data_path ../dataset/sft_i2t.parquet \
   --epochs 1 --batch_size 16 --accumulation_steps 1 --max_seq_len 768 \
   --qwen_learning_rate 1e-6 --omni_learning_rate 5e-6 \
-  --from_weight "${CHECKPOINT}" --mode all
+  --from_weight "${CHECKPOINT}" --mode all --train_modules thinker,text_head,vision_proj
 
 # Stage 6: final A2A low-LR consolidation.
 run_stage 6 29565 \
