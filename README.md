@@ -88,7 +88,7 @@ bash train.sh
 
 训练脚本具有以下行为：
 
-- 使用 4 卡 DDP 和 SwanLab。
+- 默认使用单机 16 卡 DDP 和 SwanLab；可通过 `NPROC_PER_NODE`、`PPU_DEVICES` 覆盖设备配置。
 - 每个 stage 自动继承上一个 stage 的稳定 checkpoint。
 - 每个大 epoch 结束保存一次，并原子覆盖同一目录，限制磁盘占用。
 - checkpoint 保留 FP32 master weights、optimizer、scaler 和 RNG 状态，支持 `bash train.sh` 直接续训。

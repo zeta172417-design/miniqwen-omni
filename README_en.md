@@ -28,7 +28,7 @@ source ../envs/Omni-ppu/bin/activate
 bash train.sh
 ```
 
-The seven-stage pipeline uses four-device DDP, SwanLab tracking, stable overwrite checkpoints, direct resume, dynamic removal of batch-wide padding tails, supervised-only vocabulary projection, and differential learning rates.
+The seven-stage pipeline defaults to single-node 16-device DDP and supports `NPROC_PER_NODE`/`PPU_DEVICES` overrides. It uses SwanLab tracking, stable overwrite checkpoints, direct resume, dynamic removal of batch-wide padding tails, supervised-only vocabulary projection, and differential learning rates.
 
 ## Evaluate
 

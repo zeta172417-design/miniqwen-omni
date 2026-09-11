@@ -11,7 +11,7 @@ export TORCH_DISTRIBUTED_DEBUG=OFF
 export PYTHONWARNINGS=ignore
 export MINIQWEN_DATASET_CACHE=../dataset/.miniqwen_training_cache
 
-# MiniQwen-Omni Full dataset pipeline for 4x PPU-ZW810E.
+# MiniQwen-Omni Full dataset pipeline. Defaults to one 16x PPU-ZW810E node.
 # Run from trainer/: source ../envs/Omni-ppu/bin/activate && bash train.sh
 #
 # Storage policy:
@@ -30,6 +30,16 @@ CHECKPOINT=${OUTPUT_ROOT}/${OUTPUT_NAME}/checkpoint
 SWANLAB_PROJECT=MiniQwen-Omni-Full
 PIPELINE_STATE=${OUTPUT_ROOT}/${OUTPUT_NAME}/pipeline_stage
 LOG_ROOT=../.runtime/train_logs/full
+
+# Keep the proven per-device batches when scaling from 4 to 16 PPUs so every
+# device remains well utilized. Override these two variables for another host.
+NPROC_PER_NODE=${NPROC_PER_NODE:-16}
+PPU_DEVICES=${PPU_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}
+NUM_WORKERS=${NUM_WORKERS:-4}
+if ! [[ "${NPROC_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "NPROC_PER_NODE must be a positive integer: ${NPROC_PER_NODE}" >&2
+  exit 1
+fi
 
 mkdir -p "${OUTPUT_ROOT}/${OUTPUT_NAME}"
 mkdir -p "${LOG_ROOT}"
@@ -72,7 +82,7 @@ COMMON_ARGS=(
   --save_at_epoch_end 1
   --save_optimizer_state 1
   --from_resume 1
-  --num_workers 4
+  --num_workers "${NUM_WORKERS}"
   --use_swanlab
   --swanlab_project "${SWANLAB_PROJECT}"
 )
@@ -89,9 +99,9 @@ run_stage() {
   attempt_log="${LOG_ROOT}/stage-${stage_id}-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "${attempt_log}"
   echo "Stage ${stage_id} logs: ${attempt_log}"
-  CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun \
+  CUDA_VISIBLE_DEVICES="${PPU_DEVICES}" torchrun \
     --master_port "${port}" \
-    --nproc_per_node 4 \
+    --nproc_per_node "${NPROC_PER_NODE}" \
     --log-dir "${attempt_log}/ranks" \
     --tee 3 \
     --local-ranks-filter=0 \
