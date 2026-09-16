@@ -2,9 +2,9 @@
 
 MiniQwen-Omni 是一个基于 Qwen3-0.6B Thinker 的端到端多模态训练项目，支持文本、语音和图像输入，并联合生成文本与 8 层 Mimi audio codes。
 
-本仓库只保存训练与推理代码。训练数据、本地预训练模型、训练 checkpoint、实验日志和生成音频均由 `.gitignore` 排除。
+本仓库只提交训练、推理、评测代码和架构参考源码。训练数据、本地预训练模型、训练 checkpoint、实验日志和生成音频均由 `.gitignore` 排除。
 
-当前代码版本为 **V0.1**。V0 是最初完成全量训练并上传的 parallel-delay Talker 版本；V0.1 将音频生成头升级为同帧 Main codec head + Code Predictor，并作为后续实验的新基线。发布版本同时记录在根目录 `VERSION` 和 Git tag 中。
+当前正式版本为 **V0.1**。V0 是最初完成全量训练并上传的 parallel-delay Talker 版本；V0.1 将音频生成头升级为同帧 Main codec head + Code Predictor，并固定使用冻结的 SenseVoice 与 SigLIP2 encoder。发布版本同时记录在根目录 `VERSION` 和 Git tag 中。
 
 ## 当前架构
 
@@ -23,11 +23,14 @@ Talker 使用的 Transformer block 位于 `model/model_talker.py`。它是独立
 
 ```text
 miniqwen-omni/
+├── benchmark/                 # MiniQwen / Mini-Omni2 / Qwen2.5-Omni 客观评测
 ├── dataset/
 │   └── omni_dataset.py
 ├── model/
 │   ├── model_omni.py
 │   └── model_talker.py
+├── references/
+│   └── qwen3_omni_transformers/ # 仅供架构对照，不含权重
 ├── trainer/
 │   ├── train.sh
 │   ├── train_mini.sh
@@ -35,6 +38,7 @@ miniqwen-omni/
 │   └── trainer_utils.py
 ├── scripts/
 │   ├── export_modelscope.py
+│   ├── run_omni_benchmark.sh
 │   └── web_demo_omni.py
 ├── tests/
 ├── eval_omni.py
@@ -89,6 +93,7 @@ bash train.sh
 训练脚本具有以下行为：
 
 - 默认使用单机 16 卡 DDP 和 SwanLab；可通过 `NPROC_PER_NODE`、`PPU_DEVICES` 覆盖设备配置。
+- SenseVoice 与 SigLIP2 encoder 全程冻结；仅训练 projector、Thinker、Talker 等对应 stage 指定的模块。
 - 每个 stage 自动继承上一个 stage 的稳定 checkpoint。
 - 每个大 epoch 结束保存一次，并原子覆盖同一目录，限制磁盘占用。
 - checkpoint 保留 FP32 master weights、optimizer、scaler 和 RNG 状态，支持 `bash train.sh` 直接续训。
@@ -125,7 +130,7 @@ python eval_omni.py \
 
 ## 带密码的 Web 体验
 
-项目提供支持文本、麦克风、图片、流式文本和语音回复的 Gradio 服务。密码只从环境变量读取，公网启动时强制启用认证：
+项目提供支持文本、麦克风、图片、流式文本和语音回复的 Gradio 服务。服务启动时会同时加载 `V0.1`（Main codec + Code Predictor）和 `V0`（原并行 8-code Talker），可在页面顶部切换做 A/B 试听；切换模型会自动清空对话上下文。密码只从环境变量读取，公网启动时强制启用认证：
 
 ```bash
 read -rsp 'Web password: ' MINIQWEN_WEB_PASSWORD
@@ -133,6 +138,8 @@ echo
 export MINIQWEN_WEB_PASSWORD
 bash scripts/serve_web.sh
 ```
+
+默认 checkpoint 分别为 `out/miniqwen_omni_full_main_codec_cp_v5/checkpoint` 和 `out/miniqwen_omni_full/checkpoint`。可通过 `MINIQWEN_MODEL_PATH`（V0.1）与 `MINIQWEN_V0_MODEL_PATH`（V0）覆盖路径。两套核心模型同时驻留 PPU，Mimi、SenseVoice、SigLIP2 和音色资源只加载一份。
 
 tmux 后台运行、临时 `gradio.live` 地址以及 DSW 固定公网映射方法见 `WEB_DEPLOYMENT.md`。
 
@@ -155,9 +162,13 @@ ModelScope 与私人 GitHub 的具体创建和上传命令见 `PUBLISHING.md`。
 ## 测试
 
 ```bash
-python -m unittest tests.test_miniqwen_omni tests.test_web_demo
+python -m unittest tests.test_miniqwen_omni tests.test_web_demo tests.test_benchmark
 bash -n trainer/train.sh trainer/train_mini.sh scripts/serve_web.sh
 ```
+
+MiniQwen V0/V0.1、Mini-Omni2 和 Qwen2.5-Omni-3B 的统一英文客观评测见
+`BENCHMARK.md`。外部 benchmark 模型与数据统一位于同级 `Omni/` 目录，不在本
+代码仓库中重复保存。
 
 ## 来源与许可
 

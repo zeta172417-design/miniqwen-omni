@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from scripts.web_demo_omni import (
+    ModelRuntime,
     Runtime,
     auth_from_environment,
     build_demo,
@@ -104,7 +105,13 @@ class WebDemoTests(unittest.TestCase):
         self.assertIsNone(first_image({"files": [{"path": "/tmp/a.txt"}]}))
 
     def test_ui_builds_without_loading_a_model(self):
-        runtime = Runtime(None, None, None, None, {}, "cpu", None, 30)
+        runtime = Runtime(
+            None, None, None, None, {}, "cpu", None, 30,
+            models={
+                "v01": ModelRuntime("V0.1", None, None),
+                "v0": ModelRuntime("V0", None, None),
+            },
+        )
         args = SimpleNamespace(open_thinking=False, max_text_chars=4000)
         demo = build_demo(runtime, args)
         self.assertGreater(len(demo.blocks), 10)
@@ -121,6 +128,13 @@ class WebDemoTests(unittest.TestCase):
         ]
         self.assertEqual(len(send_audio), 1)
         self.assertTrue(send_audio[0]["props"]["interactive"])
+        model_switch = [
+            component for component in demo.get_config_file()["components"]
+            if component.get("type") == "radio"
+            and component.get("props", {}).get("label") == "模型版本（切换会清空上下文）"
+        ]
+        self.assertEqual(len(model_switch), 1)
+        self.assertEqual(len(model_switch[0]["props"]["choices"]), 2)
 
 
 if __name__ == "__main__":

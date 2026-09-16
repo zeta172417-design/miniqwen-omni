@@ -21,9 +21,8 @@ from torch.utils.data import DataLoader, Subset
 from transformers import logging as hf_logging
 
 from dataset.omni_dataset import OmniDataset
-from model.model_omni import MiniQwenOmni
 from trainer.train_sft_omni import build_talker_attention_mask, omni_collate_fn
-from trainer.trainer_utils import configure_token_ids, load_omni_tokenizer, setup_seed
+from trainer.trainer_utils import configure_token_ids, get_omni_model_class, infer_omni_model_arch, load_external_encoder_sidecars, load_omni_tokenizer, setup_seed
 
 
 def move_pixels(pixel_values, device):
@@ -341,20 +340,22 @@ def main():
     setup_seed(42)
     hf_logging.set_verbosity_error()
     checkpoint = str(Path(args.checkpoint).resolve())
+    model_class = get_omni_model_class(infer_omni_model_arch(checkpoint))
     tokenizer = load_omni_tokenizer(checkpoint)
-    model = MiniQwenOmni.from_pretrained(
+    model = model_class.from_pretrained(
         checkpoint,
         dtype=torch.bfloat16,
         audio_encoder_path=None,
         vision_model_path=None,
     )
     configure_token_ids(model.config, tokenizer)
-    audio_encoder, audio_processor = MiniQwenOmni.load_sensevoice(args.audio_encoder_dir)
-    vision_encoder, vision_processor = MiniQwenOmni.load_vision(args.vision_dir)
+    audio_encoder, audio_processor = model_class.load_sensevoice(args.audio_encoder_dir)
+    vision_encoder, vision_processor = model_class.load_vision(args.vision_dir)
     object.__setattr__(model, "audio_encoder", audio_encoder)
     object.__setattr__(model, "audio_processor", audio_processor)
     object.__setattr__(model, "vision_encoder", vision_encoder)
     object.__setattr__(model, "vision_processor", vision_processor)
+    restored_encoders = load_external_encoder_sidecars(model, checkpoint)
     model = model.eval().to(args.device)
     if model.audio_encoder is not None:
         model.audio_encoder.to(args.device)
@@ -379,6 +380,7 @@ def main():
         "code_predictor_num_layers": model.config.code_predictor_num_layers,
         "code_predictor_hidden_size": model.config.code_predictor_hidden_size,
         "residual_codec_loss_weight": model.config.residual_codec_loss_weight,
+        "external_encoder_sidecars": restored_encoders,
         "datasets": {},
     }
     for kind in ("t2a", "a2a", "i2t"):

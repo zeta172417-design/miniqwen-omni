@@ -2,9 +2,9 @@
 
 MiniQwen-Omni is an end-to-end multimodal training project built around a Qwen3-0.6B Thinker. It accepts text, speech, and images and jointly produces text and eight Mimi audio-code streams.
 
-This repository contains code only. Datasets, pretrained auxiliary models, checkpoints, experiment logs, and generated media are excluded by `.gitignore`.
+This repository commits training, inference, evaluation, and architecture-reference code only. Datasets, pretrained auxiliary models, checkpoints, experiment logs, and generated media are excluded by `.gitignore`.
 
-The current code release is **V0.1**. V0 denotes the initially trained and uploaded parallel-delay Talker; V0.1 replaces it with same-frame Main codec head + Code Predictor audio generation and is the new baseline. Releases are recorded in both the root `VERSION` file and Git tags.
+The current production release is **V0.1**. V0 denotes the initially trained and uploaded parallel-delay Talker; V0.1 replaces it with same-frame Main codec head + Code Predictor audio generation and keeps the SenseVoice and SigLIP2 encoders frozen. Releases are recorded in both the root `VERSION` file and Git tags.
 
 ## Architecture
 
@@ -28,7 +28,9 @@ source ../envs/Omni-ppu/bin/activate
 bash train.sh
 ```
 
-The seven-stage pipeline defaults to single-node 16-device DDP and supports `NPROC_PER_NODE`/`PPU_DEVICES` overrides. It uses SwanLab tracking, stable overwrite checkpoints, direct resume, dynamic removal of batch-wide padding tails, supervised-only vocabulary projection, and differential learning rates.
+The seven-stage pipeline defaults to single-node 16-device DDP and supports `NPROC_PER_NODE`/`PPU_DEVICES` overrides. It uses SwanLab tracking, stable overwrite checkpoints, direct resume, dynamic removal of batch-wide padding tails, supervised-only vocabulary projection, and differential learning rates. SenseVoice and SigLIP2 remain frozen throughout the production pipeline.
+
+See `BENCHMARK.md` for the common English evaluation against Mini-Omni2 and Qwen2.5-Omni-3B.
 
 ## Evaluate
 
@@ -67,7 +69,7 @@ The export converts FP32 training weights to BF16 inference weights and excludes
 ## Test
 
 ```bash
-python -m unittest tests.test_miniqwen_omni tests.test_web_demo
+python -m unittest tests.test_miniqwen_omni tests.test_web_demo tests.test_benchmark
 bash -n trainer/train.sh trainer/train_mini.sh scripts/serve_web.sh
 ```
 

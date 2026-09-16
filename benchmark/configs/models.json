@@ -1,0 +1,56 @@
+{
+  "run_id": "standard-v1",
+  "manifest": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/standard/manifest.jsonl",
+  "output_root": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-results",
+  "seed": 20260913,
+  "tasks": ["text", "audio", "vision", "audio_vision", "robustness"],
+  "models": [
+    {
+      "id": "miniqwen-v0",
+      "role": "0.6B parallel-delay baseline",
+      "adapter": "benchmark.adapters.miniqwen:MiniQwenAdapter",
+      "kwargs": {
+        "checkpoint": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/out/miniqwen_omni_full/checkpoint",
+        "audio_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/SenseVoiceSmall",
+        "vision_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/siglip2-base-p32-256-ve",
+        "mimi": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/mimi",
+        "device": "cuda",
+        "return_audio": true
+      }
+    },
+    {
+      "id": "miniqwen-v0.1",
+      "role": "0.6B primary",
+      "adapter": "benchmark.adapters.miniqwen:MiniQwenAdapter",
+      "kwargs": {
+        "checkpoint": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/out/miniqwen_omni_full_main_codec_cp_v5/checkpoint",
+        "audio_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/SenseVoiceSmall",
+        "vision_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/siglip2-base-p32-256-ve",
+        "mimi": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/mimi",
+        "device": "cuda",
+        "return_audio": true
+      }
+    },
+    {
+      "id": "mini-omni2",
+      "role": "0.5B matched baseline",
+      "adapter": "benchmark.adapters.mini_omni2:MiniOmni2Adapter",
+      "kwargs": {
+        "source": "/mnt/workspace/zhaozetao/multimodel/Omni/mini-omni2/source",
+        "checkpoint": "/mnt/workspace/zhaozetao/multimodel/Omni/mini-omni2/checkpoint",
+        "device": "cuda:0"
+      }
+    },
+    {
+      "id": "qwen2.5-omni-3b",
+      "role": "strong upper bound",
+      "adapter": "benchmark.adapters.qwen25_omni:Qwen25OmniAdapter",
+      "kwargs": {
+        "checkpoint": "/mnt/workspace/zhaozetao/multimodel/Omni/Qwen2.5-Omni-3B",
+        "device": "cuda",
+        "speaker": "Chelsie",
+        "return_audio": true
+      }
+    }
+  ]
+}

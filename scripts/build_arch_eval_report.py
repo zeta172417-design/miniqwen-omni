@@ -55,6 +55,32 @@ def fmt(value, percent=False):
     return f"{value * 100:.2f}%" if percent else f"{value:.4f}"
 
 
+def table_text(value):
+    return str(value or "—").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def append_comparison(lines, title, baseline, candidate):
+    lines += [
+        "",
+        title,
+        "",
+        "| Metric | Baseline | Candidate | Delta | Direction |",
+        "|---|---:|---:|---:|---|",
+    ]
+    for label, path, direction in METRICS:
+        before, after = comparable_metric(baseline, path), comparable_metric(candidate, path)
+        if before is None or after is None:
+            continue
+        delta = after - before
+        improved = delta < 0 if direction == "lower" else delta > 0
+        verdict = "better" if improved else ("same" if abs(delta) < 1e-12 else "worse")
+        percent = "accuracy" in path[-1]
+        lines.append(
+            f"| {label} | {fmt(before, percent)} | {fmt(after, percent)} | "
+            f"{fmt(delta, percent) if delta < 0 else '+' + fmt(delta, percent)} | {direction}; **{verdict}** |"
+        )
+
+
 def stage_key(path):
     match = STAGE_NUMBER.search(path.name)
     return int(match.group(1)) if match else 999
@@ -202,7 +228,7 @@ def build(args):
         f"| Thinker bridge layer | {final_report.get('accept_hidden_layer', '—')} |",
         f"| Checkpoint | `{args.checkpoint}` |",
         "",
-        "## Dataset",
+        "## Training-domain dataset (legacy stage diagnostics)",
         "",
         "| Task | Train | Dev | Train language | Dev language | Group overlap |",
         "|---|---:|---:|---|---|---:|",
@@ -215,9 +241,98 @@ def build(args):
             f"{train_language} | {dev_language} | {stats.get('group_overlap', '—')} |"
         )
 
+    holdout_path = result_dir / "holdout-final.json"
+    holdout_manifest_path = result_dir / "holdout_manifest.json"
+    holdout_report = json.loads(holdout_path.read_text(encoding="utf-8")) if holdout_path.exists() else None
+    holdout_manifest = json.loads(holdout_manifest_path.read_text(encoding="utf-8")) if holdout_manifest_path.exists() else {}
+    if holdout_report is not None:
+        lines += [
+            "",
+            "## Full-corpus holdout evaluation (primary)",
+            "",
+            "These fixed English examples come from the full datasets and are excluded from mini training by auditable group keys. Use this section for architecture selection; the stage table below remains a training-domain diagnostic.",
+            "",
+            "| Task | Full source rows | Mini train rows | Holdout pool | Evaluated | Primary exclusion | Primary overlap | Content overlap |",
+            "|---|---:|---:|---:|---:|---|---:|---|",
+        ]
+        for task, stats in holdout_manifest.get("stats", {}).items():
+            evaluated = nested(holdout_report, (task, "samples"))
+            if "conversation_overlap" in stats:
+                content_overlap = (
+                    f"{stats['conversation_overlap']}/{stats.get('dev_conversation_groups', '—')} conversations"
+                )
+            elif task == "t2a":
+                content_overlap = "0 (primary key)"
+            else:
+                content_overlap = "—"
+            lines.append(
+                f"| {task.upper()} | {stats.get('source_rows', '—')} | {stats.get('train', '—')} | "
+                f"{stats.get('dev', '—')} | {evaluated if evaluated is not None else '—'} | "
+                f"{stats.get('group_key', '—')} | {stats.get('group_overlap', '—')} | {content_overlap} |"
+            )
+        a2a_stats = holdout_manifest.get("stats", {}).get("a2a", {})
+        if a2a_stats.get("conversation_overlap", 0):
+            lines += [
+                "",
+                "> **A2A scope:** this full corpus contains only a few English conversations outside mini training. "
+                "The A2A holdout therefore measures unseen-speaker/acoustic generalisation; "
+                f"{a2a_stats['conversation_overlap']}/{a2a_stats.get('dev_conversation_groups', '—')} unique conversations "
+                "reuse text spoken by other training speakers. Do not interpret it as an unseen-question semantic benchmark.",
+            ]
+        lines += [
+            "",
+            "| T2A 8-code NLL | T2A acc | A2A text loss | A2A text acc | A2A 8-code NLL | A2A audio acc | Audio input gain | Speaker gain | I2T text loss | I2T text acc | Vision gain |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| " + " | ".join([
+                fmt(comparable_metric(holdout_report, ("t2a", "correct", "audio_nll_excluding_eos"))),
+                fmt(comparable_metric(holdout_report, ("t2a", "correct", "audio_accuracy")), True),
+                fmt(comparable_metric(holdout_report, ("a2a", "correct", "text_loss"))),
+                fmt(comparable_metric(holdout_report, ("a2a", "correct", "text_accuracy")), True),
+                fmt(comparable_metric(holdout_report, ("a2a", "correct", "audio_nll_excluding_eos"))),
+                fmt(comparable_metric(holdout_report, ("a2a", "correct", "audio_accuracy")), True),
+                fmt(comparable_metric(holdout_report, ("a2a", "audio_input_gain", "text_loss"))),
+                fmt(comparable_metric(holdout_report, ("a2a", "speaker_only_gain", "audio_nll_excluding_eos"))),
+                fmt(comparable_metric(holdout_report, ("i2t", "correct", "text_loss"))),
+                fmt(comparable_metric(holdout_report, ("i2t", "correct", "text_accuracy")), True),
+                fmt(comparable_metric(holdout_report, ("i2t", "vision_gain", "text_loss"))),
+            ]) + " |",
+        ]
+        examples = []
+        for task, stats in holdout_manifest.get("stats", {}).items():
+            for example in stats.get("examples", []):
+                examples.append((task.upper(), example))
+        if examples:
+            lines += [
+                "",
+                "### Holdout examples",
+                "",
+                "| Task | Group | User input | Reference answer |",
+                "|---|---|---|---|",
+            ]
+            for task, example in examples:
+                lines.append(
+                    f"| {task} | `{example.get('group', '—')}` | {table_text(example.get('user'))} | "
+                    f"{table_text(example.get('assistant'))} |"
+                )
+
+        baseline_holdout_path = Path(args.baseline_result_dir).resolve() / "holdout-final.json"
+        baseline_holdout_manifest = Path(args.baseline_result_dir).resolve() / "holdout_manifest.json"
+        same_holdout = (
+            baseline_holdout_path.exists() and baseline_holdout_manifest.exists() and
+            holdout_manifest_path.read_bytes() == baseline_holdout_manifest.read_bytes()
+        )
+        if same_holdout:
+            baseline_holdout = json.loads(baseline_holdout_path.read_text(encoding="utf-8"))
+            append_comparison(
+                lines,
+                f"### Holdout comparison with `{Path(args.baseline_result_dir).resolve().name}`",
+                baseline_holdout,
+                holdout_report,
+            )
+
     lines += [
         "",
-        "## Metrics by stage",
+        "## Metrics by stage (training-domain diagnostic)",
         "",
         "Dev metrics are teacher-forced. Lower loss and higher accuracy/gain are better.",
         "",
@@ -253,26 +368,12 @@ def build(args):
         same_data = manifest_path.exists() and baseline_manifest.exists() and manifest_path.read_bytes() == baseline_manifest.read_bytes()
         matching_baseline = next((report for path, report in baseline_reports if stage_key(path) == final_stage_id), None)
         if matching_baseline is not None and same_data:
-            baseline = matching_baseline
-            lines += [
-                "",
+            append_comparison(
+                lines,
                 f"## Stage {final_stage_id} comparison with `{baseline_dir.name}`",
-                "",
-                "| Metric | Baseline | Candidate | Delta | Direction |",
-                "|---|---:|---:|---:|---|",
-            ]
-            for label, path, direction in METRICS:
-                before, after = comparable_metric(baseline, path), comparable_metric(final_report, path)
-                if before is None or after is None:
-                    continue
-                delta = after - before
-                improved = delta < 0 if direction == "lower" else delta > 0
-                verdict = "better" if improved else ("same" if abs(delta) < 1e-12 else "worse")
-                percent = path[-1] == "accuracy"
-                lines.append(
-                    f"| {label} | {fmt(before, percent)} | {fmt(after, percent)} | "
-                    f"{fmt(delta, percent) if delta < 0 else '+' + fmt(delta, percent)} | {direction}; **{verdict}** |"
-                )
+                matching_baseline,
+                final_report,
+            )
 
     samples = parse_generation(result_dir / "generation.log")
     lines += ["", "## Qualitative generation", ""]
@@ -356,7 +457,7 @@ def main():
     parser.add_argument("--result-dir", required=True)
     parser.add_argument("--train-log-dir", required=True)
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--baseline-result-dir", default=str(root / ".runtime/arch_eval/mrope_special_multiimage_v1"))
+    parser.add_argument("--baseline-result-dir", default=str(root / ".runtime/arch_eval/main_codec_cp_2l_v1"))
     parser.add_argument("--output", default="")
     build(parser.parse_args())
 

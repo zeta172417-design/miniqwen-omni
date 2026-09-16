@@ -1,0 +1,3 @@
+qwen-omni-utils[decord]==0.0.9
+accelerate>=1.0
+soundfile>=0.12

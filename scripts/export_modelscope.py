@@ -12,7 +12,7 @@ from transformers import AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from model.model_omni import MiniQwenOmni  # noqa: E402
+from trainer.trainer_utils import get_omni_model_class, infer_omni_model_arch  # noqa: E402
 
 
 MODEL_CARD = """---
@@ -25,10 +25,12 @@ license: apache-2.0
 
 # MiniQwen-Omni
 
-MiniQwen-Omni uses Qwen3-0.6B as its 28-layer, 1024-dimensional Thinker and a
+This is the **V0.1 frozen-encoder release**. MiniQwen-Omni uses Qwen3-0.6B as
+its 28-layer, 1024-dimensional Thinker and a
 6-layer, 768-dimensional Talker that predicts eight Mimi audio codebooks. The
 default bridge consumes Thinker layer 14 and projects 1024-dimensional hidden
-states to the Talker width.
+states to the Talker width. A Main codec head predicts c0 and a two-layer Code
+Predictor autoregressively predicts c1-c7 within the same Mimi frame.
 
 This repository contains the BF16 core model and tokenizer. Frozen auxiliary
 models are intentionally external:
@@ -46,7 +48,7 @@ evaluate safety, factuality, speech quality, and language coverage before use.
 from modelscope import snapshot_download
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-repo = "YOUR_MODELSCOPE_USER/MiniQwen-Omni"
+repo = "peachPPP/MiniQwen-Omni-V0.1"
 local_dir = snapshot_download(repo)
 tokenizer = AutoTokenizer.from_pretrained(local_dir, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
@@ -91,7 +93,8 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
-    model = MiniQwenOmni.from_pretrained(
+    model_class = get_omni_model_class(infer_omni_model_arch(str(checkpoint)))
+    model = model_class.from_pretrained(
         checkpoint,
         dtype=torch.float32,
         low_cpu_mem_usage=True,

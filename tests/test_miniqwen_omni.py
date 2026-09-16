@@ -9,11 +9,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from PIL import Image
+from safetensors.torch import load_file as load_safetensors_file
 
 from dataset.omni_dataset import OmniDataset
 from model.model_omni import CodePredictor, MimiCodecEmbedding, MiniQwenOmni, MiniQwenMRoPERotaryEmbedding, OmniConfig, TalkerModule
-from trainer.trainer_utils import configure_token_ids, load_omni_tokenizer
-from trainer.train_sft_omni import build_talker_attention_mask, compute_audio_losses, configure_trainable_modules, init_swanlab_tracking, omni_collate_fn, trim_batch_to_active_length
+from trainer.trainer_utils import _attach_external_encoder, configure_token_ids, load_external_encoder_sidecars, load_omni_tokenizer, omni_checkpoint
+from trainer.train_sft_omni import build_talker_attention_mask, compute_audio_losses, configure_trainable_modules, distributed_audio_branch_enabled, init_swanlab_tracking, omni_collate_fn, trim_batch_to_active_length
 
 
 QWEN_PATH = "model/Qwen3-0.6B"
@@ -58,6 +59,111 @@ class MiniQwenOmniConfigTest(unittest.TestCase):
         self.assertTrue(model.talker.spk_proj.weight.requires_grad)
         self.assertTrue(model.audio_proj.weight.requires_grad)
         self.assertFalse(model.model.weight.requires_grad)
+
+    def test_audio_branch_decision_is_synchronized_across_ddp_ranks(self):
+        no_local_audio = torch.full((2, 8, 4), -100)
+        self.assertFalse(distributed_audio_branch_enabled(no_local_audio))
+
+        def remote_rank_has_audio(flag, op):
+            self.assertIs(op, torch.distributed.ReduceOp.MAX)
+            flag.fill_(1)
+
+        with patch('trainer.train_sft_omni.dist.is_initialized', return_value=True), patch(
+            'trainer.train_sft_omni.dist.all_reduce', side_effect=remote_rank_has_audio
+        ):
+            self.assertTrue(distributed_audio_branch_enabled(no_local_audio))
+
+    def test_external_encoder_registration_is_opt_in(self):
+        class Owner(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                object.__setattr__(self, 'audio_encoder', None)
+
+        frozen_owner = Owner()
+        frozen = torch.nn.Linear(3, 4)
+        _attach_external_encoder(frozen_owner, 'audio_encoder', frozen, False)
+        self.assertNotIn('audio_encoder', frozen_owner._modules)
+        self.assertFalse(any(parameter.requires_grad for parameter in frozen.parameters()))
+        self.assertFalse(frozen_owner._train_audio_encoder)
+
+        trainable_owner = Owner()
+        trainable = torch.nn.Linear(3, 4)
+        _attach_external_encoder(trainable_owner, 'audio_encoder', trainable, True)
+        self.assertIs(trainable_owner._modules['audio_encoder'], trainable)
+        self.assertTrue(all(parameter.requires_grad for parameter in trainable.parameters()))
+        self.assertTrue(trainable_owner._train_audio_encoder)
+
+    def test_audio_encoder_gradient_is_controlled_by_training_flag(self):
+        class FakeAudioEncoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = torch.nn.Linear(3, 4)
+
+            def forward(self, values, lengths):
+                return self.proj(values), lengths
+
+        for enabled in (False, True):
+            encoder = FakeAudioEncoder()
+            owner = SimpleNamespace(
+                audio_encoder=encoder,
+                audio_proj=torch.nn.Linear(4, 5),
+                _train_audio_encoder=enabled,
+            )
+            values = torch.ones(2, 3, 3)
+            lengths = torch.tensor([3, 3])
+            output = MiniQwenOmni.encode_audio_inputs(owner, values, lengths)
+            sum(item.sum() for item in output).backward()
+            if enabled:
+                self.assertIsNotNone(encoder.proj.weight.grad)
+                self.assertGreater(float(encoder.proj.weight.grad.abs().sum()), 0)
+            else:
+                self.assertIsNone(encoder.proj.weight.grad)
+
+    def test_encoder_sidecar_is_separate_from_core_checkpoint(self):
+        config = OmniConfig(
+            vocab_size=128, hidden_size=32, intermediate_size=64,
+            num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+            head_dim=8, max_position_embeddings=64,
+            num_talker_hidden_layers=1, talker_hidden_size=32,
+            code_predictor_hidden_size=32, code_predictor_num_layers=1,
+            code_predictor_num_attention_heads=4,
+            code_predictor_num_key_value_heads=2,
+            code_predictor_intermediate_size=64,
+            audio_vocab_size=2112, audio_codebook_size=2048,
+            spk_emb_size=16, accept_hidden_layer=1,
+            use_mrope=False, audio_head_type='main_codec_predictor',
+        )
+        model = MiniQwenOmni(config, audio_encoder_path=None, vision_model_path=None)
+        encoder = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.LayerNorm(4))
+        _attach_external_encoder(model, 'audio_encoder', encoder, True)
+        object.__setattr__(model, '_persist_audio_encoder', True)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch('transformers.modeling_utils.unwrap_model', lambda value, **_: value):
+                checkpoint = omni_checkpoint(
+                    config, weight='sidecar', model=model,
+                    save_dir=tmp, save_optimizer_state=False,
+                )
+            self.assertTrue(os.path.isfile(os.path.join(checkpoint, 'audio_encoder.safetensors')))
+            trainer_state = torch.load(
+                os.path.join(checkpoint, 'trainer_state.pt'),
+                map_location='cpu', weights_only=False,
+            )
+            self.assertEqual(
+                trainer_state['external_encoder_sidecars'],
+                ['audio_encoder.safetensors'],
+            )
+            core = load_safetensors_file(os.path.join(checkpoint, 'model.safetensors'))
+            self.assertFalse(any(name.startswith('audio_encoder.') for name in core))
+            sidecar = load_safetensors_file(os.path.join(checkpoint, 'audio_encoder.safetensors'))
+            self.assertIn('0.weight', sidecar)
+            reloaded_encoder = torch.nn.Sequential(
+                torch.nn.Linear(3, 4), torch.nn.LayerNorm(4)
+            )
+            reloaded = SimpleNamespace(audio_encoder=reloaded_encoder, vision_encoder=None)
+            restored = load_external_encoder_sidecars(reloaded, checkpoint)
+            self.assertEqual(restored, ['audio_encoder'])
+            for name, value in encoder.state_dict().items():
+                self.assertTrue(torch.equal(value, reloaded_encoder.state_dict()[name]))
 
     def test_eval_audio_prompt_is_deterministic_and_has_no_transcript(self):
         tokenizer = load_omni_tokenizer(QWEN_PATH)

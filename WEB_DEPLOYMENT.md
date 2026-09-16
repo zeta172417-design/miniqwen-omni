@@ -1,6 +1,6 @@
 # MiniQwen-Omni Web 部署
 
-Web 应用支持文本、麦克风/音频、单张图片、多轮上下文、流式文本、Mimi 语音回复和预设音色。推理请求在一张 PPU 上串行执行，其他用户进入最多 8 个请求的队列，避免并发导致显存峰值或缓存串扰。
+Web 应用支持文本、麦克风/音频、单张图片、多轮上下文、流式文本、Mimi 语音回复和预设音色。它会同时加载 V0.1（Main codec + Code Predictor）与 V0（原并行 8-code Talker），页面顶部可直接切换；切换时会清空上下文，避免两个模型共用历史。推理请求在一张 PPU 上串行执行，其他用户进入最多 8 个请求的队列，避免并发导致显存峰值或缓存串扰。
 
 界面分为“文字 / 图片”和“语音”两个输入页，二者互不依赖。回复形式显示在输入区上方；“仅文字（更快）”会完全跳过 Talker，“文字 + 语音”会同时生成文字和音频。语音可以单独发送：进入“语音”页 → 开始录音 → 停止并等待波形出现 → 点击“发送这段语音”。浏览器通常会阻止未由用户手势触发的自动播放，看到回复后可手动点击播放器的 ▶。
 
@@ -23,7 +23,8 @@ bash scripts/serve_web.sh
 默认使用：
 
 - PPU `0`；
-- `out/miniqwen_omni_full/checkpoint`；
+- V0.1：`out/miniqwen_omni_full_main_codec_cp_v5/checkpoint`；
+- V0：`out/miniqwen_omni_full/checkpoint`；
 - BF16 核心权重；
 - `0.0.0.0:7860`；
 - 用户名 `miniqwen`，密码来自 `MINIQWEN_WEB_PASSWORD`；
@@ -68,13 +69,39 @@ bash scripts/serve_web.sh
 
 公网访问必须使用 HTTPS。若 DSW 公网入口没有代管 TLS，请在前面配置带证书的 Nginx/Caddy 或其他 HTTPS 网关；不要在纯 HTTP 公网上输入密码。Gradio 内建密码适合小范围体验，不包含 MFA、失败锁定或完整的限流能力。
 
-## 4. 常用配置
+## 4. cpolar 国内临时入口
+
+项目提供 `scripts/serve_cpolar.sh`，让 Gradio 保持 `share=False`，由 cpolar 将本机 `7860` 转发到公网。免费版提供 1 Mbps 带宽和随机 HTTPS 地址，但地址会在约 24 小时内变化；固定二级域名需要付费套餐。
+
+先在一个独立 tmux 会话中启动 Web 服务；看到 `Running on local URL` 后按 `Ctrl-b`、再按 `d` 退出该会话：
+
+```bash
+tmux new -s miniqwen-web-server
+export MINIQWEN_WEB_SHARE=0
+bash scripts/serve_web.sh
+```
+
+回到普通终端后再创建另一个 tmux 会话，从 cpolar 控制台复制 authtoken，然后启动隧道。不要在正在运行 Gradio 的同一个窗口里启动 cpolar，否则会先停止模型服务，只留下无法连接 `7860` 的空隧道：
+
+```bash
+tmux new -s miniqwen-cpolar
+cd /path/to/miniqwen-omni
+read -rsp 'Cpolar authtoken: ' CPOLAR_AUTHTOKEN
+echo
+export CPOLAR_AUTHTOKEN
+bash scripts/serve_cpolar.sh
+```
+
+终端显示 HTTPS 转发地址后，按 `Ctrl-b`、再按 `d`。认证 token 只保存到 `.runtime/cpolar/home/.cpolar/cpolar.yml`，不会提交到 Git。
+
+## 5. 常用配置
 
 所有敏感信息保留在环境变量中，以下变量不会写入 checkpoint：
 
 ```bash
-# 改用 ModelScope 下载后的 BF16 目录
+# 分别覆盖 V0.1 与 V0 checkpoint
 export MINIQWEN_MODEL_PATH=/path/to/miniqwen-omni-bf16
+export MINIQWEN_V0_MODEL_PATH=/path/to/miniqwen-omni-v0-bf16
 
 # 改端口或选择另一张物理 PPU
 export MINIQWEN_WEB_PORT=9000
@@ -93,7 +120,7 @@ export MINIQWEN_WEB_DISABLE_ASR=1
 bash scripts/serve_web.sh --max-upload-mb 30
 ```
 
-## 5. 验证与排障
+## 6. 验证与排障
 
 本机检查端口：
 

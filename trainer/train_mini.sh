@@ -13,7 +13,7 @@ export MINIQWEN_DATASET_CACHE=../dataset/.miniqwen_mini_cache
 
 MODEL_PATH=../model/Qwen3-0.6B
 OUTPUT_ROOT=../out
-# The same-frame head is format-v5 and must not reuse delayed-head weights.
+# Main codec + Code Predictor production architecture (V0.1).
 OUTPUT_NAME=miniqwen_omni_mini_main_codec_cp_v5
 CHECKPOINT=${OUTPUT_ROOT}/${OUTPUT_NAME}/checkpoint
 PIPELINE_STATE=${OUTPUT_ROOT}/${OUTPUT_NAME}/pipeline_stage
@@ -26,7 +26,7 @@ MINI_STOP_AFTER_STAGE="${MINI_STOP_AFTER_STAGE:-2}"
 mkdir -p "${OUTPUT_ROOT}/${OUTPUT_NAME}"
 mkdir -p "${LOG_ROOT}"
 
-# If pipeline_stage does not exist yet, recover a completed stage from the
+# If pipeline_stage does not exist yet, recover a completed stage from this
 # format-v5 checkpoint's trainer_state.
 COMPLETED_STAGE=-1
 if [[ -f "${PIPELINE_STATE}" ]]; then
@@ -57,6 +57,7 @@ COMMON_ARGS=(
   --num_talker_hidden_layers 6
   --talker_hidden_size 768
   --accept_hidden_layer 14
+  --model_arch production
   --audio_head_type main_codec_predictor
   --code_predictor_num_layers 2
   --code_predictor_hidden_size 768
@@ -69,6 +70,8 @@ COMMON_ARGS=(
   --use_moe 0
   --use_compile 0
   --gradient_checkpointing 0
+  --train_audio_encoder 0
+  --train_vision_encoder 0
   --save_interval 0
   --save_optimizer_state 1
   --from_resume 1

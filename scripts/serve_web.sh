@@ -38,7 +38,8 @@ if [[ -n "${MINIQWEN_WEB_PROXY:-}" ]]; then
 fi
 
 web_args=(
-  --model-path "${MINIQWEN_MODEL_PATH:-${PROJECT_ROOT}/out/miniqwen_omni_full/checkpoint}"
+  --model-path "${MINIQWEN_MODEL_PATH:-${PROJECT_ROOT}/out/miniqwen_omni_full_main_codec_cp_v5/checkpoint}"
+  --baseline-model-path "${MINIQWEN_V0_MODEL_PATH:-${PROJECT_ROOT}/out/miniqwen_omni_full/checkpoint}"
   --audio-encoder "${MINIQWEN_AUDIO_ENCODER:-${PROJECT_ROOT}/model/SenseVoiceSmall}"
   --vision-model "${MINIQWEN_VISION_MODEL:-${PROJECT_ROOT}/model/siglip2-base-p32-256-ve}"
   --mimi-path "${MINIQWEN_MIMI_PATH:-${PROJECT_ROOT}/model/mimi}"

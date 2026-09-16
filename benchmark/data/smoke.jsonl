@@ -1,0 +1,3 @@
+{"sample_id":"text-arc-001","task":"text","metric":"mcq","prompt":"Which object is used to tell time?\nA. Spoon\nB. Clock\nC. Pillow\nD. Shoe\nAnswer with only the option letter.","reference":"B","choices":["Spoon","Clock","Pillow","Shoe"],"source":"smoke"}
+{"sample_id":"text-boolq-001","task":"text","metric":"mcq","prompt":"Water freezes at 0 degrees Celsius. Is this statement true?\nA. Yes\nB. No\nAnswer with only the option letter.","reference":"A","choices":["Yes","No"],"source":"smoke"}
+{"sample_id":"instruction-001","task":"text","metric":"constraint","prompt":"Reply with JSON containing the key answer and no more than five words.","reference":{"json":true,"max_words":5},"source":"smoke"}

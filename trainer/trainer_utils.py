@@ -12,9 +12,33 @@ import numpy as np
 import datasets
 import torch
 import torch.distributed as dist
+from safetensors.torch import load_model as load_safetensors_model
+from safetensors.torch import save_model as save_safetensors_model
 from torch.utils.data import Sampler
 from transformers import AutoTokenizer, logging as hf_logging
 from model.model_omni import MiniQwenOmni
+
+
+def get_omni_model_class(model_arch='production'):
+    """Resolve the supported production architecture implementation."""
+    if model_arch == 'production':
+        return MiniQwenOmni
+    raise ValueError(f'unsupported model_arch: {model_arch}')
+
+
+def infer_omni_model_arch(checkpoint_dir):
+    """Select the implementation from a saved config without guessing."""
+    config_path = os.path.join(checkpoint_dir, 'config.json')
+    if not os.path.isfile(config_path):
+        return 'production'
+    with open(config_path, encoding='utf-8') as handle:
+        saved_config = json.load(handle)
+    if saved_config.get('codec_feedback_type') == 'qwen_hidden_rmsnorm':
+        raise ValueError(
+            'This checkpoint uses the retired qwen_hidden_rmsnorm feedback experiment; '
+            'use the archived experiment code only for historical analysis.'
+        )
+    return 'production'
     
 
 
@@ -139,8 +163,48 @@ def format_image_prompt(config, count=1):
     return payload * int(count)
 
 
-def init_omni_model(omni_config, from_weight='qwen', tokenizer_path='../model/Qwen3-0.6B', audio_encoder_path='../model/SenseVoiceSmall', vision_model_path='../model/siglip2-base-p32-256-ve', save_dir='../out', device='cuda', freeze_backbone='none', from_resume=0):
+def _attach_external_encoder(model, name, encoder, trainable=False):
+    """Attach an auxiliary encoder with optional nn.Module registration.
+
+    Frozen encoders retain the historical unregistered attachment, keeping
+    production checkpoints unchanged. A trainable encoder must be registered
+    so DDP, the optimizer and gradient clipping can see its parameters.
+    """
+    if name in model.__dict__:
+        object.__delattr__(model, name)
+    elif name in model._modules:
+        delattr(model, name)
+    if encoder is None:
+        object.__setattr__(model, name, None)
+        object.__setattr__(model, f'_train_{name}', False)
+        return
+    if trainable:
+        model.add_module(name, encoder)
+    else:
+        object.__setattr__(model, name, encoder)
+    for parameter in encoder.parameters():
+        parameter.requires_grad = bool(trainable)
+    encoder.train(bool(trainable))
+    object.__setattr__(model, f'_train_{name}', bool(trainable))
+
+
+def load_external_encoder_sidecars(model, checkpoint_dir):
+    """Restore optional trained auxiliary encoders from a MiniQwen checkpoint."""
+    restored = []
+    for name, label in (('audio_encoder', '音频'), ('vision_encoder', '视觉')):
+        path = os.path.join(checkpoint_dir, f'{name}.safetensors')
+        encoder = getattr(model, name, None)
+        if encoder is not None and os.path.isfile(path):
+            load_safetensors_model(encoder, path, strict=True)
+            object.__setattr__(model, f'_persist_{name}', True)
+            Logger(f'已加载{label}encoder参数: {path}')
+            restored.append(name)
+    return restored
+
+
+def init_omni_model(omni_config, from_weight='qwen', tokenizer_path='../model/Qwen3-0.6B', audio_encoder_path='../model/SenseVoiceSmall', vision_model_path='../model/siglip2-base-p32-256-ve', save_dir='../out', device='cuda', freeze_backbone='none', from_resume=0, train_audio_encoder=False, train_vision_encoder=False, model_arch='production'):
     hf_logging.set_verbosity_error()
+    model_class = get_omni_model_class(model_arch)
     tokenizer = load_omni_tokenizer(tokenizer_path)
     configure_token_ids(omni_config, tokenizer)
     load_path = from_weight if os.path.isdir(from_weight) else tokenizer_path
@@ -156,7 +220,15 @@ def init_omni_model(omni_config, from_weight='qwen', tokenizer_path='../model/Qw
                     f'configured {omni_config.audio_head_type}; start the new head from Qwen3 '
                     f'or select the matching legacy branch explicitly'
                 )
-    model = MiniQwenOmni.from_pretrained(
+            saved_feedback = saved_config.get('codec_feedback_type', 'mean_embedding')
+            configured_feedback = getattr(omni_config, 'codec_feedback_type', 'mean_embedding')
+            if saved_feedback != configured_feedback:
+                raise ValueError(
+                    f'checkpoint codec_feedback_type={saved_feedback} is incompatible with '
+                    f'configured {configured_feedback}; use a separate checkpoint '
+                    f'for the Qwen feedback experiment'
+                )
+    model = model_class.from_pretrained(
         load_path,
         config=omni_config,
         # Keep trainable parameters and AdamW moments in FP32.  BF16 is used
@@ -166,12 +238,15 @@ def init_omni_model(omni_config, from_weight='qwen', tokenizer_path='../model/Qw
         audio_encoder_path=None,
         vision_model_path=None,
     )
-    audio_encoder, audio_processor = MiniQwenOmni.load_sensevoice(audio_encoder_path)
-    vision_encoder, vision_processor = MiniQwenOmni.load_vision(vision_model_path)
-    object.__setattr__(model, 'audio_encoder', audio_encoder)
+    audio_encoder, audio_processor = model_class.load_sensevoice(audio_encoder_path)
+    vision_encoder, vision_processor = model_class.load_vision(vision_model_path)
+    _attach_external_encoder(model, 'audio_encoder', audio_encoder, train_audio_encoder)
     object.__setattr__(model, 'audio_processor', audio_processor)
-    object.__setattr__(model, 'vision_encoder', vision_encoder)
+    _attach_external_encoder(model, 'vision_encoder', vision_encoder, train_vision_encoder)
     object.__setattr__(model, 'vision_processor', vision_processor)
+    object.__setattr__(model, '_persist_audio_encoder', bool(train_audio_encoder))
+    object.__setattr__(model, '_persist_vision_encoder', bool(train_vision_encoder))
+    load_external_encoder_sidecars(model, load_path)
     Logger(f'已加载模型: {load_path}')
     
     # 冻结策略
@@ -202,7 +277,27 @@ def omni_checkpoint(omni_config, weight='miniqwen_omni', model=None, optimizer=N
         # Save the FP32 master parameters.  Casting them back to BF16 here
         # would discard low-LR Qwen/Norm updates and make resume non-equivalent
         # even though forward/backward correctly used BF16 autocast.
-        raw_model.save_pretrained(tmp_dir, safe_serialization=True)
+        # Registered trainable encoders are external dependencies and use
+        # dedicated sidecars. Keep the core HF state compatible with ordinary
+        # MiniQwen checkpoints by excluding those registered prefixes.
+        core_state = {
+            name: value for name, value in raw_model.state_dict().items()
+            if not name.startswith(('audio_encoder.', 'vision_encoder.'))
+        }
+        raw_model.save_pretrained(tmp_dir, state_dict=core_state, safe_serialization=True)
+        encoder_sidecars = []
+        if getattr(raw_model, '_persist_audio_encoder', False):
+            save_safetensors_model(
+                raw_model.audio_encoder,
+                os.path.join(tmp_dir, 'audio_encoder.safetensors'),
+            )
+            encoder_sidecars.append('audio_encoder.safetensors')
+        if getattr(raw_model, '_persist_vision_encoder', False):
+            save_safetensors_model(
+                raw_model.vision_encoder,
+                os.path.join(tmp_dir, 'vision_encoder.safetensors'),
+            )
+            encoder_sidecars.append('vision_encoder.safetensors')
         if tokenizer is not None:
             tokenizer.save_pretrained(tmp_dir)
         swanlab_id = None
@@ -218,6 +313,7 @@ def omni_checkpoint(omni_config, weight='miniqwen_omni', model=None, optimizer=N
             'step': step,
             'world_size': dist.get_world_size() if dist.is_initialized() else 1,
             'swanlab_id': swanlab_id,
+            'external_encoder_sidecars': encoder_sidecars,
             'rng_state': {
                 'python': random.getstate(),
                 'numpy': np.random.get_state(),

@@ -23,6 +23,7 @@ envs/
 # Training data and dataset caches
 dataset/*.parquet
 dataset/arch_eval/
+dataset/arch_eval_holdout/
 dataset/eval_omni/
 dataset/.*/
 dataset/.msc

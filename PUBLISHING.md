@@ -4,7 +4,7 @@
 
 ## 1. 发布到私人 GitHub 仓库
 
-当前工作目录已连接私人仓库 `zeta172417-design/miniqwen-omni`，默认分支为 `main`，不再配置 MiniMind-O remote。V0 对应第一次上传的代码，V0.1 对应 Main codec head + Code Predictor 基线。
+当前工作目录已连接私人仓库 `zeta172417-design/miniqwen-omni`，默认分支为 `main`，不再配置 MiniMind-O remote。V0 对应第一次上传的代码；V0.1 对应 Main codec head + Code Predictor、冻结 SenseVoice/SigLIP2 encoder 的正式基线。
 
 发布后续代码版本时执行：
 
@@ -62,20 +62,21 @@ modelscope login --token "$MINIQWEN_MODELSCOPE_TOKEN"
 unset MINIQWEN_MODELSCOPE_TOKEN
 ```
 
-将 `YOUR_MODELSCOPE_USER` 换成你的 ModelScope 用户名：
+V0 保留在 `peachPPP/MiniQwen-Omni`，不得用后续版本覆盖。V0.1 使用独立仓库
+`peachPPP/MiniQwen-Omni-V0.1`：
 
 ```bash
-modelscope create YOUR_MODELSCOPE_USER/MiniQwen-Omni \
+modelscope create peachPPP/MiniQwen-Omni-V0.1 \
   --repo-type model \
   --visibility private \
   --license 'Apache License 2.0' \
   --description 'Qwen3-0.6B based text/audio/vision Omni model' \
   --exist-ok
 
-modelscope upload YOUR_MODELSCOPE_USER/MiniQwen-Omni \
+modelscope upload peachPPP/MiniQwen-Omni-V0.1 \
   releases/miniqwen-omni-bf16 \
   --repo-type model \
-  --commit-message 'Upload MiniQwen-Omni BF16 checkpoint' \
+  --commit-message 'Release MiniQwen-Omni V0.1 frozen-encoder BF16 checkpoint' \
   --max-workers 4
 ```
 
@@ -86,7 +87,7 @@ ModelScope 1.37.0 的 `upload` 子命令没有 `--use-cache` 或 `--sync` 参数
 下载到新目录，避免误用本地原文件：
 
 ```bash
-modelscope download --model YOUR_MODELSCOPE_USER/MiniQwen-Omni \
+modelscope download --model peachPPP/MiniQwen-Omni-V0.1 \
   --local_dir /tmp/miniqwen-omni-modelscope-check
 ```
 

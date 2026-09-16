@@ -8,8 +8,7 @@ import soundfile as sf
 from PIL import Image
 from pydub import AudioSegment
 from transformers import MimiModel
-from model.model_omni import MiniQwenOmni
-from trainer.trainer_utils import load_omni_tokenizer, configure_token_ids, format_audio_prompt, format_image_prompt
+from trainer.trainer_utils import load_omni_tokenizer, configure_token_ids, format_audio_prompt, format_image_prompt, load_external_encoder_sidecars, get_omni_model_class, infer_omni_model_arch
 from dataset.omni_dataset import OmniDataset
 from trainer.trainer_utils import setup_seed, log_model_params
 warnings.filterwarnings('ignore')
@@ -22,19 +21,21 @@ def project_path(*parts):
 
 
 def init_model(args):
+    model_class = get_omni_model_class(infer_omni_model_arch(args.load_from))
     tokenizer = load_omni_tokenizer(args.load_from)
-    model = MiniQwenOmni.from_pretrained(
+    model = model_class.from_pretrained(
         args.load_from,
         dtype=torch.bfloat16,
         audio_encoder_path=None,
         vision_model_path=None,
     )
-    audio_encoder, audio_processor = MiniQwenOmni.load_sensevoice(args.audio_encoder_dir)
-    vision_encoder, vision_processor = MiniQwenOmni.load_vision(args.vision_dir)
+    audio_encoder, audio_processor = model_class.load_sensevoice(args.audio_encoder_dir)
+    vision_encoder, vision_processor = model_class.load_vision(args.vision_dir)
     object.__setattr__(model, 'audio_encoder', audio_encoder)
     object.__setattr__(model, 'audio_processor', audio_processor)
     object.__setattr__(model, 'vision_encoder', vision_encoder)
     object.__setattr__(model, 'vision_processor', vision_processor)
+    load_external_encoder_sidecars(model, args.load_from)
     configure_token_ids(model.config, tokenizer)
     log_model_params(model)
     if model.audio_encoder is not None: model.audio_encoder.to(args.device)

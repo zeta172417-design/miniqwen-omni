@@ -66,6 +66,7 @@ COMMON_ARGS=(
   --num_talker_hidden_layers 6
   --talker_hidden_size 768
   --accept_hidden_layer 14
+  --model_arch production
   --audio_head_type main_codec_predictor
   --code_predictor_num_layers 2
   --code_predictor_hidden_size 768

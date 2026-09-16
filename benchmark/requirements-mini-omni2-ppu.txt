@@ -1,0 +1,10 @@
+# Installed with --no-deps into .runtime/mini_omni2_ppu_deps.
+# Do not add torch/torchvision/torchaudio: the host must retain its PPU builds.
+lightning==2.5.5
+pytorch-lightning==2.5.5
+openai-whisper==20250625
+openai-clip==1.0.1
+snac==1.2.1
+tiktoken==0.11.0
+more-itertools==10.8.0
+ftfy==6.3.1

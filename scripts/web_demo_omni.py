@@ -11,7 +11,7 @@ import secrets
 import sys
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any
@@ -26,17 +26,25 @@ from transformers import MimiModel
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from model.model_omni import MiniQwenOmni  # noqa: E402
 from trainer.trainer_utils import (  # noqa: E402
     configure_token_ids,
     format_audio_prompt,
     format_image_prompt,
+    get_omni_model_class,
+    infer_omni_model_arch,
     load_omni_tokenizer,
 )
 
 LOGGER = logging.getLogger("miniqwen.web")
 MODEL_LOCK = Lock()
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+@dataclass
+class ModelRuntime:
+    label: str
+    model: Any
+    tokenizer: Any
 
 
 @dataclass
@@ -49,6 +57,15 @@ class Runtime:
     device: str
     dtype: torch.dtype
     max_audio_seconds: float
+    models: dict[str, ModelRuntime] = field(default_factory=dict)
+    default_model: str = "v01"
+
+    def select_model(self, model_key: str | None = None) -> ModelRuntime:
+        if self.models:
+            key = model_key if model_key in self.models else self.default_model
+            return self.models[key]
+        # Backward-compatible path for small unit-test runtimes.
+        return ModelRuntime(label="MiniQwen-Omni", model=self.model, tokenizer=self.tokenizer)
 
 
 def normalize_audio(samples: np.ndarray, sample_rate: int, target_rate: int = 16000) -> np.ndarray:
@@ -130,41 +147,53 @@ def load_voices() -> dict[str, dict[str, torch.Tensor]]:
 
 
 def load_runtime(args: argparse.Namespace) -> Runtime:
-    model_path = require_dir(args.model_path, "MiniQwen-Omni checkpoint")
+    model_path = require_dir(args.model_path, "V0.1 checkpoint")
+    baseline_model_path = require_dir(args.baseline_model_path, "V0 checkpoint")
     audio_path = require_dir(args.audio_encoder, "SenseVoice")
     vision_path = require_dir(args.vision_model, "SigLIP2")
     mimi_path = require_dir(args.mimi_path, "Mimi")
     dtype = resolve_dtype(args.dtype, args.device)
 
-    LOGGER.info("Loading MiniQwen-Omni from %s", model_path)
-    tokenizer = load_omni_tokenizer(model_path)
-    # Use the current local implementation so inference fixes do not depend on
-    # the older remote-code snapshot copied into a training checkpoint.
-    model = MiniQwenOmni.from_pretrained(
-        model_path,
-        trust_remote_code=True,
-        dtype=dtype,
-        low_cpu_mem_usage=True,
-        audio_encoder_path=None,
-        vision_model_path=None,
-    )
-    configure_token_ids(model.config, tokenizer)
+    def load_core(key: str, label: str, checkpoint: str) -> ModelRuntime:
+        LOGGER.info("Loading %s (%s) from %s", label, key, checkpoint)
+        model_class = get_omni_model_class(infer_omni_model_arch(str(checkpoint)))
+        tokenizer = load_omni_tokenizer(checkpoint)
+        # Use the current local implementation so inference fixes do not depend
+        # on an older remote-code snapshot copied into a training checkpoint.
+        model = model_class.from_pretrained(
+            checkpoint,
+            trust_remote_code=True,
+            dtype=dtype,
+            low_cpu_mem_usage=True,
+            audio_encoder_path=None,
+            vision_model_path=None,
+        )
+        configure_token_ids(model.config, tokenizer)
+        model = model.eval().to(args.device)
+        parameters = sum(parameter.numel() for parameter in model.parameters())
+        LOGGER.info("Loaded %s: %.2fM parameters", label, parameters / 1e6)
+        return ModelRuntime(label=label, model=model, tokenizer=tokenizer)
 
-    audio_encoder, audio_processor = MiniQwenOmni.load_sensevoice(audio_path)
-    vision_encoder, vision_processor = MiniQwenOmni.load_vision(vision_path)
+    models = {
+        "v01": load_core("v01", args.model_label, model_path),
+        "v0": load_core("v0", args.baseline_model_label, baseline_model_path),
+    }
+    model_class = get_omni_model_class("production")
+    audio_encoder, audio_processor = model_class.load_sensevoice(audio_path)
+    vision_encoder, vision_processor = model_class.load_vision(vision_path)
     # SenseVoice's loader lowers the root logger level globally; restore web logs.
     logging.getLogger().setLevel(logging.INFO)
     if audio_encoder is None or audio_processor is None:
         raise RuntimeError("SenseVoice加载失败，无法处理语音输入")
     if vision_encoder is None or vision_processor is None:
         raise RuntimeError("SigLIP2加载失败，无法处理图片输入")
-    object.__setattr__(model, "audio_encoder", audio_encoder)
-    object.__setattr__(model, "audio_processor", audio_processor)
-    object.__setattr__(model, "vision_encoder", vision_encoder)
-    object.__setattr__(model, "vision_processor", vision_processor)
-    model = model.eval().to(args.device)
-    model.audio_encoder.to(args.device)
-    model.vision_encoder.to(args.device)
+    for bundle in models.values():
+        object.__setattr__(bundle.model, "audio_encoder", audio_encoder)
+        object.__setattr__(bundle.model, "audio_processor", audio_processor)
+        object.__setattr__(bundle.model, "vision_encoder", vision_encoder)
+        object.__setattr__(bundle.model, "vision_processor", vision_processor)
+    audio_encoder.to(args.device)
+    vision_encoder.to(args.device)
 
     LOGGER.info("Loading Mimi from %s", mimi_path)
     mimi_model = MimiModel.from_pretrained(mimi_path).eval().to(args.device)
@@ -193,27 +222,33 @@ def load_runtime(args: argparse.Namespace) -> Runtime:
             root_logger.setLevel(previous_level)
 
     voices = load_voices()
-    parameters = sum(parameter.numel() for parameter in model.parameters())
     LOGGER.info(
-        "Ready: %.2fM parameters | core=%s | device=%s | voices=%d",
-        parameters / 1e6,
+        "Ready: models=%s | core=%s | device=%s | voices=%d",
+        ", ".join(bundle.label for bundle in models.values()),
         dtype,
         args.device,
         len(voices),
     )
+    default_bundle = models["v01"]
     return Runtime(
-        model=model,
-        tokenizer=tokenizer,
+        model=default_bundle.model,
+        tokenizer=default_bundle.tokenizer,
         mimi_model=mimi_model,
         asr_model=asr_model,
         voices=voices,
         device=args.device,
         dtype=dtype,
         max_audio_seconds=args.max_audio_seconds,
+        models=models,
+        default_model="v01",
     )
 
 
-def prepare_audio(runtime: Runtime, audio: tuple[int, np.ndarray] | None):
+def prepare_audio(
+    runtime: Runtime,
+    audio: tuple[int, np.ndarray] | None,
+    selected: ModelRuntime | None = None,
+):
     if audio is None:
         return None, None, None, None
     sample_rate, raw_samples = audio
@@ -222,7 +257,8 @@ def prepare_audio(runtime: Runtime, audio: tuple[int, np.ndarray] | None):
     if duration > runtime.max_audio_seconds:
         raise ValueError(f"语音最长支持 {runtime.max_audio_seconds:g} 秒，当前约 {duration:.1f} 秒")
 
-    inputs = runtime.model.audio_processor(
+    selected = selected or runtime.select_model()
+    inputs = selected.model.audio_processor(
         samples,
         sampling_rate=16000,
         return_tensors="pt",
@@ -259,7 +295,7 @@ def prepare_audio(runtime: Runtime, audio: tuple[int, np.ndarray] | None):
     return mel, audio_lens, valid_len, asr_task
 
 
-def prepare_image(runtime: Runtime, path: str | None):
+def prepare_image(runtime: Runtime, path: str | None, selected: ModelRuntime | None = None):
     if path is None:
         return None
     with Image.open(path) as source:
@@ -267,13 +303,14 @@ def prepare_image(runtime: Runtime, path: str | None):
         if width * height > 40_000_000:
             raise ValueError("图片像素过大，请上传小于 4000 万像素的图片")
         image = source.convert("RGB").copy()
+    selected = selected or runtime.select_model()
     return {
         name: value.to(runtime.device)
-        for name, value in runtime.model.vision_processor(images=image, return_tensors="pt").items()
+        for name, value in selected.model.vision_processor(images=image, return_tensors="pt").items()
     }
 
 
-def voice_condition(runtime: Runtime, voice_name: str):
+def voice_condition(runtime: Runtime, voice_name: str, selected: ModelRuntime | None = None):
     if voice_name == "default" or voice_name not in runtime.voices:
         return None, None
     voice = runtime.voices[voice_name]
@@ -282,13 +319,22 @@ def voice_condition(runtime: Runtime, voice_name: str):
         ref_codes = ref_codes.unsqueeze(0).to(runtime.device)
     spk_emb = voice.get("spk_emb")
     if spk_emb is not None:
-        spk_dtype = next(runtime.model.talker.spk_proj.parameters()).dtype
+        selected = selected or runtime.select_model()
+        spk_dtype = next(selected.model.talker.spk_proj.parameters()).dtype
         spk_emb = spk_emb.to(device=runtime.device, dtype=spk_dtype).unsqueeze(0)
     return ref_codes, spk_emb
 
 
-def render_input(runtime: Runtime, history: list[dict], prompt: str, max_new_tokens: int, thinking: bool):
-    tokenizer = runtime.tokenizer
+def render_input(
+    runtime: Runtime,
+    history: list[dict],
+    prompt: str,
+    max_new_tokens: int,
+    thinking: bool,
+    selected: ModelRuntime | None = None,
+):
+    selected = selected or runtime.select_model()
+    tokenizer = selected.tokenizer
     retained = list(history)
     while True:
         messages = retained + [{"role": "user", "content": prompt}]
@@ -299,7 +345,7 @@ def render_input(runtime: Runtime, history: list[dict], prompt: str, max_new_tok
             enable_thinking=thinking,
         )
         token_ids = tokenizer(rendered, add_special_tokens=False).input_ids
-        limit = int(getattr(runtime.model.config, "max_position_embeddings", 40960))
+        limit = int(getattr(selected.model.config, "max_position_embeddings", 40960))
         if len(token_ids) + max_new_tokens <= limit:
             tensor = torch.tensor(token_ids, dtype=torch.long, device=runtime.device).unsqueeze(0)
             return tensor, retained
@@ -327,6 +373,7 @@ def decode_audio(runtime: Runtime, frames: list[list[int]]):
 
 def stream_answer(
     runtime: Runtime,
+    model_key: str,
     text: str,
     audio,
     image_path: str | None,
@@ -339,19 +386,23 @@ def stream_answer(
     generate_audio: bool,
 ):
     started_at = time.perf_counter()
-    audio_inputs, audio_lens, audio_token_len, asr_task = prepare_audio(runtime, audio)
-    pixel_values = prepare_image(runtime, image_path)
+    selected = runtime.select_model(model_key)
+    model = selected.model
+    tokenizer = selected.tokenizer
+    audio_inputs, audio_lens, audio_token_len, asr_task = prepare_audio(runtime, audio, selected)
+    pixel_values = prepare_image(runtime, image_path, selected)
     prompt_parts = [text.strip()] if text.strip() else []
     if audio_token_len is not None:
-        prompt_parts.append(format_audio_prompt(runtime.model.config, audio_token_len))
+        prompt_parts.append(format_audio_prompt(model.config, audio_token_len))
     if pixel_values is not None:
-        prompt_parts.append(format_image_prompt(runtime.model.config))
+        prompt_parts.append(format_image_prompt(model.config))
     prompt = "\n\n".join(prompt_parts)
     input_ids, retained_history = render_input(
-        runtime, history, prompt, max_new_tokens=max_new_tokens, thinking=thinking
+        runtime, history, prompt, max_new_tokens=max_new_tokens, thinking=thinking,
+        selected=selected,
     )
-    ref_codes, spk_emb = voice_condition(runtime, voice_name)
-    newline_ids = runtime.tokenizer.encode("\n", add_special_tokens=False)
+    ref_codes, spk_emb = voice_condition(runtime, voice_name, selected)
+    newline_ids = tokenizer.encode("\n", add_special_tokens=False)
     if len(newline_ids) != 1:
         raise RuntimeError(f"换行符应编码为一个 token，实际为 {newline_ids}")
 
@@ -359,9 +410,9 @@ def stream_answer(
     decoded_length = 0
     first_text_at = None
     with MODEL_LOCK, torch.inference_mode():
-        generator = runtime.model.generate(
+        generator = model.generate(
             input_ids,
-            eos_token_id=runtime.tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
@@ -372,7 +423,7 @@ def stream_answer(
             return_audio_codes=generate_audio,
             open_thinking=thinking,
             newline_token_id=newline_ids[0],
-            pad_token_id=runtime.tokenizer.pad_token_id,
+            pad_token_id=tokenizer.pad_token_id,
             audio_inputs=audio_inputs,
             audio_lens=audio_lens,
             pixel_values=pixel_values,
@@ -382,7 +433,7 @@ def stream_answer(
         for generated, audio_frame in generator:
             chunk = None
             if generated is not None:
-                answer = runtime.tokenizer.decode(generated[0].tolist(), skip_special_tokens=True)
+                answer = tokenizer.decode(generated[0].tolist(), skip_special_tokens=True)
                 if answer and not answer.endswith("�") and len(answer) > decoded_length:
                     chunk = answer[decoded_length:]
                     decoded_length = len(answer)
@@ -401,7 +452,8 @@ def stream_answer(
         yield None, "decoding", asr_text, retained_history
         audio_result = decode_audio(runtime, frames)
         LOGGER.info(
-            "Inference timing: first_text=%.2fs generation=%.2fs total=%.2fs audio_frames=%d",
+            "Inference timing [%s]: first_text=%.2fs generation=%.2fs total=%.2fs audio_frames=%d",
+            selected.label,
             (first_text_at - started_at) if first_text_at else -1,
             generation_elapsed,
             time.perf_counter() - started_at,
@@ -410,7 +462,8 @@ def stream_answer(
         yield None, audio_result, asr_text, retained_history
     else:
         LOGGER.info(
-            "Inference timing: first_text=%.2fs total=%.2fs audio=off",
+            "Inference timing [%s]: first_text=%.2fs total=%.2fs audio=off",
+            selected.label,
             (first_text_at - started_at) if first_text_at else -1,
             time.perf_counter() - started_at,
         )
@@ -419,8 +472,11 @@ def stream_answer(
 
 def build_demo(runtime: Runtime, args: argparse.Namespace) -> gr.Blocks:
     voice_choices = [("默认音色", "default")] + [(name, name) for name in sorted(runtime.voices)]
+    model_choices = [
+        (bundle.label, key) for key, bundle in runtime.models.items()
+    ] or [("MiniQwen-Omni", runtime.default_model)]
 
-    def respond_core(text, audio, image, voice, chat_history, model_history, turns,
+    def respond_core(text, audio, image, model_key, voice, chat_history, model_history, turns,
                      temperature, top_p, max_tokens, thinking, response_mode,
                      request: gr.Request):
         chat_history = list(chat_history or [])
@@ -454,9 +510,11 @@ def build_demo(runtime: Runtime, args: argparse.Namespace) -> gr.Blocks:
         generate_audio = response_mode == "文本 + 语音"
         retained = model_history[-int(turns) * 2:] if int(turns) > 0 else []
         retained_history = retained
+        selected = runtime.select_model(model_key)
         try:
             for chunk, audio_result, asr_result, retained_history in stream_answer(
                 runtime=runtime,
+                model_key=model_key,
                 text=text or ("请描述这张图片。" if image_path and audio is None else ""),
                 audio=audio,
                 image_path=image_path,
@@ -499,10 +557,13 @@ def build_demo(runtime: Runtime, args: argparse.Namespace) -> gr.Blocks:
                 {"role": "user", "content": user_memory},
                 {"role": "assistant", "content": response},
             ]
-            LOGGER.info("Completed request for user=%s", getattr(request, "username", "unknown"))
+            LOGGER.info(
+                "Completed request for user=%s model=%s",
+                getattr(request, "username", "unknown"), selected.label,
+            )
             final_status = (
-                "✅ 完成；若浏览器未自动播放，请点击下方播放器的 ▶"
-                if final_audio is not None else "✅ 文本完成"
+                f"✅ {selected.label} 完成；若浏览器未自动播放，请点击下方播放器的 ▶"
+                if final_audio is not None else f"✅ {selected.label} 文本完成"
             )
             yield chat_history, final_audio, model_history, final_status
         except Exception as exc:
@@ -513,7 +574,7 @@ def build_demo(runtime: Runtime, args: argparse.Namespace) -> gr.Blocks:
     def clear_chat():
         return [], None, [], "已清空对话"
 
-    def respond_text_image(text, image, voice, chat_history, model_history, turns,
+    def respond_text_image(text, image, model_key, voice, chat_history, model_history, turns,
                            temperature, top_p, max_tokens, thinking, response_mode,
                            request: gr.Request):
         LOGGER.info(
@@ -523,11 +584,11 @@ def build_demo(runtime: Runtime, args: argparse.Namespace) -> gr.Blocks:
             image is not None,
         )
         yield from respond_core(
-            text, None, image, voice, chat_history, model_history, turns,
+            text, None, image, model_key, voice, chat_history, model_history, turns,
             temperature, top_p, max_tokens, thinking, response_mode, request,
         )
 
-    def respond_audio(audio, voice, chat_history, model_history, turns, temperature,
+    def respond_audio(audio, model_key, voice, chat_history, model_history, turns, temperature,
                       top_p, max_tokens, thinking, response_mode, request: gr.Request):
         LOGGER.info(
             "Audio submit for user=%s (has_audio=%s)",
@@ -535,9 +596,13 @@ def build_demo(runtime: Runtime, args: argparse.Namespace) -> gr.Blocks:
             audio is not None,
         )
         yield from respond_core(
-            "", audio, None, voice, chat_history, model_history, turns,
+            "", audio, None, model_key, voice, chat_history, model_history, turns,
             temperature, top_p, max_tokens, thinking, response_mode, request,
         )
+
+    def switch_model(model_key):
+        selected = runtime.select_model(model_key)
+        return [], None, [], f"✅ 已切换到 {selected.label}；对话上下文已清空"
 
     css = """
     .gradio-container {max-width: 1080px !important; margin: auto !important;}
@@ -564,10 +629,17 @@ def build_demo(runtime: Runtime, args: argparse.Namespace) -> gr.Blocks:
             allow_file_downloads=False,
         )
         model_history = gr.State([])
-        status = gr.Markdown("模型已就绪", elem_id="status")
+        default_label = runtime.select_model(runtime.default_model).label
+        status = gr.Markdown(f"模型已就绪：{default_label}", elem_id="status")
 
-        gr.Markdown("### 1. 选择回复形式")
+        gr.Markdown("### 1. 选择模型与回复形式")
         with gr.Row(equal_height=True):
+            model_choice = gr.Radio(
+                model_choices,
+                value=runtime.default_model,
+                label="模型版本（切换会清空上下文）",
+                scale=3,
+            )
             response_mode = gr.Radio(
                 [("仅文字（更快）", "快速文本"), ("文字 + 语音", "文本 + 语音")],
                 value="文本 + 语音",
@@ -637,7 +709,7 @@ def build_demo(runtime: Runtime, args: argparse.Namespace) -> gr.Blocks:
             clear = gr.Button("清空对话")
             gr.Button("退出登录", link="/logout?all_session=false")
 
-        common_inputs = [voice, chatbot, model_history, turns, temperature,
+        common_inputs = [model_choice, voice, chatbot, model_history, turns, temperature,
                          top_p, max_tokens, thinking, response_mode]
         outputs = [chatbot, audio_out, model_history, status]
         text_event = send_text.click(
@@ -666,6 +738,13 @@ def build_demo(runtime: Runtime, args: argparse.Namespace) -> gr.Blocks:
             concurrency_id="miniqwen-model",
             concurrency_limit=1,
             show_progress="hidden",
+        )
+        model_choice.change(
+            switch_model,
+            model_choice,
+            outputs,
+            queue=False,
+            api_name=False,
         )
         stop.click(
             lambda: "⏹️ 已请求停止",
@@ -699,7 +778,18 @@ def auth_from_environment(args: argparse.Namespace):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MiniQwen-Omni password-protected Gradio server")
-    parser.add_argument("--model-path", default=str(PROJECT_ROOT / "out/miniqwen_omni_full/checkpoint"))
+    parser.add_argument(
+        "--model-path",
+        default=str(PROJECT_ROOT / "out/miniqwen_omni_full_main_codec_cp_v5/checkpoint"),
+        help="默认的新模型（V0.1 Main codec + Code Predictor）",
+    )
+    parser.add_argument(
+        "--baseline-model-path",
+        default=str(PROJECT_ROOT / "out/miniqwen_omni_full/checkpoint"),
+        help="用于网页A/B切换的V0基线模型",
+    )
+    parser.add_argument("--model-label", default="V0.1 · Main codec + Code Predictor")
+    parser.add_argument("--baseline-model-label", default="V0 · Parallel 8-code Talker")
     parser.add_argument("--audio-encoder", default=str(PROJECT_ROOT / "model/SenseVoiceSmall"))
     parser.add_argument("--vision-model", default=str(PROJECT_ROOT / "model/siglip2-base-p32-256-ve"))
     parser.add_argument("--mimi-path", default=str(PROJECT_ROOT / "model/mimi"))

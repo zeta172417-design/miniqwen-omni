@@ -29,7 +29,7 @@ TRAINING_FORMAT_VERSION = 5
 
 TRAIN_MODULE_CHOICES = {
     'all', 'thinker', 'text_head', 'talker', 'talker_core',
-    'speaker', 'audio_proj', 'vision_proj',
+    'speaker', 'audio_proj', 'vision_proj', 'audio_encoder', 'vision_encoder',
 }
 
 
@@ -57,6 +57,11 @@ def configure_trainable_modules(model, specification):
     if requested == ['all']:
         for parameter in model.parameters():
             parameter.requires_grad = True
+        vision_encoder = getattr(model, 'vision_encoder', None)
+        if getattr(model, '_train_vision_encoder', False) and vision_encoder is not None:
+            for name, parameter in vision_encoder.named_parameters():
+                if name.startswith('vision_model.head.'):
+                    parameter.requires_grad = False
         return requested
 
     modules = {
@@ -66,6 +71,8 @@ def configure_trainable_modules(model, specification):
         'speaker': model.talker.spk_proj,
         'audio_proj': model.audio_proj,
         'vision_proj': model.vision_proj,
+        'audio_encoder': getattr(model, 'audio_encoder', None),
+        'vision_encoder': getattr(model, 'vision_encoder', None),
     }
     for name in requested:
         if name == 'talker_core':
@@ -73,8 +80,17 @@ def configure_trainable_modules(model, specification):
                 if not parameter_name.startswith('spk_proj.'):
                     parameter.requires_grad = True
         else:
-            for parameter in modules[name].parameters():
-                parameter.requires_grad = True
+            if modules[name] is None:
+                raise ValueError(f'{name} is unavailable; check its model path')
+            for parameter_name, parameter in modules[name].named_parameters():
+                # MiniQwen consumes SigLIP's token-level last_hidden_state.
+                # The pooling head is not on that graph and must remain frozen
+                # or DDP correctly reports it as an unused trainable branch.
+                unused_vision_pooler = (
+                    name == 'vision_encoder' and
+                    parameter_name.startswith('vision_model.head.')
+                )
+                parameter.requires_grad = not unused_vision_pooler
     return requested
 
 
@@ -95,6 +111,7 @@ def init_swanlab_tracking(args, ckp_data):
         'group': base_name,
         'config': {
             'stage_id': args.stage_id,
+            'model_arch': getattr(args, 'model_arch', 'production'),
             'train_modules': getattr(args, 'train_modules', '') or 'legacy',
             'use_mrope': bool(getattr(args, 'use_mrope', 0)),
             'use_modality_boundaries': bool(getattr(args, 'use_modality_boundaries', 0)),
@@ -104,6 +121,10 @@ def init_swanlab_tracking(args, ckp_data):
             'code_predictor_num_layers': getattr(args, 'code_predictor_num_layers', 2),
             'code_predictor_hidden_size': getattr(args, 'code_predictor_hidden_size', 768),
             'residual_codec_loss_weight': getattr(args, 'residual_codec_loss_weight', 0.3),
+            'train_audio_encoder': bool(getattr(args, 'train_audio_encoder', 0)),
+            'train_vision_encoder': bool(getattr(args, 'train_vision_encoder', 0)),
+            'audio_encoder_learning_rate': getattr(args, 'audio_encoder_learning_rate', 0.0),
+            'vision_encoder_learning_rate': getattr(args, 'vision_encoder_learning_rate', 0.0),
             'checkpoint_epoch': ckp_data.get('epoch', 0) if ckp_data else 0,
             'checkpoint_step': ckp_data.get('step', 0) if ckp_data else 0,
             'resumed_from_run_id': previous_run_id,
@@ -150,6 +171,21 @@ def build_talker_attention_mask(thinker_attention_mask, audio_labels):
         raise ValueError(f'audio_labels must be (B,8,T) aligned with thinker mask, got {tuple(audio_labels.shape)}')
     audio_positions = (audio_labels != -100).any(dim=1)
     return (thinker_attention_mask.bool() | audio_positions).to(dtype=thinker_attention_mask.dtype)
+
+
+def distributed_audio_branch_enabled(audio_labels):
+    """Make the conditional Talker graph identical on every DDP rank.
+
+    Dynamic/truncated batches can leave one rank with no valid audio targets
+    while another rank still has them.  Letting those ranks independently skip
+    the Talker gives DDP a barrier on one rank and Talker gradient all-reduces
+    on the others.  A one-scalar MAX keeps the optimization unchanged while
+    making parameter participation consistent.
+    """
+    enabled = audio_labels.ne(-100).any().to(dtype=torch.int32)
+    if dist.is_initialized():
+        dist.all_reduce(enabled, op=dist.ReduceOp.MAX)
+    return bool(enabled.item())
 
 
 def compute_audio_losses(result, audio_labels, config):
@@ -255,8 +291,8 @@ def omni_collate_fn(batch, dynamic_padding=True, pad_to_multiple=8):
 
 def train_epoch(epoch, loader, iters, start_step=0, swanlab=None):
     start_time = time.time()
-    last_step = start_step
     last_grad_norm = 0.0
+    last_encoder_grad_norms = {'audio_encoder': 0.0, 'vision_encoder': 0.0}
     if 'cuda' in args.device:
         torch.cuda.reset_peak_memory_stats()
     for step, (input_ids, attention_mask, labels, audio_labels, audio_inputs, audio_lens, pixel_values, spk_emb) in enumerate(loader, start=start_step + 1):
@@ -274,7 +310,6 @@ def train_epoch(epoch, loader, iters, start_step=0, swanlab=None):
             else:
                 pixel_values = pixel_values.to(args.device)
         spk_emb = spk_emb.to(args.device)
-        last_step = step
         for param_group in optimizer.param_groups:
             param_group['lr'] = get_lr(epoch * iters + step, args.epochs * iters, param_group['base_lr'])
 
@@ -293,7 +328,7 @@ def train_epoch(epoch, loader, iters, start_step=0, swanlab=None):
                 # Talker here makes I2T joint tuning faster without changing
                 # its loss or gradients. A2A projector tuning still runs the
                 # frozen Talker because audio loss trains audio_proj through it.
-                output_audio_logits=bool(audio_labels.ne(-100).any().item()),
+                output_audio_logits=distributed_audio_branch_enabled(audio_labels),
                 audio_targets=audio_labels,
                 text_logits_mask=text_logits_mask,
             )
@@ -312,8 +347,23 @@ def train_epoch(epoch, loader, iters, start_step=0, swanlab=None):
             loss = (text_loss + audio_loss + res.aux_loss) / args.accumulation_steps
 
         scaler.scale(loss).backward()
-        if step % args.accumulation_steps == 0:
+        # Flush an incomplete accumulation window before an epoch checkpoint.
+        # Otherwise a 2157-step epoch with accumulation=2 saves before applying
+        # its final gradients and the checkpoint silently loses that update.
+        optimizer_step = step % args.accumulation_steps == 0 or step == iters
+        if optimizer_step:
             scaler.unscale_(optimizer)
+            if step % args.log_interval == 0 or step == iters:
+                for group in optimizer.param_groups:
+                    group_name = group.get('name')
+                    if group_name not in last_encoder_grad_norms:
+                        continue
+                    norms = [
+                        parameter.grad.detach().float().norm(2)
+                        for parameter in group['params'] if parameter.grad is not None
+                    ]
+                    if norms:
+                        last_encoder_grad_norms[group_name] = float(torch.stack(norms).norm(2))
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             last_grad_norm = float(grad_norm)
             scaler.step(optimizer)
@@ -329,6 +379,8 @@ def train_epoch(epoch, loader, iters, start_step=0, swanlab=None):
             residual_codec_loss_val = residual_codec_loss.item() if isinstance(residual_codec_loss, torch.Tensor) else 0
             qwen_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'qwen'), 0.0)
             omni_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'omni'), 0.0)
+            audio_encoder_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'audio_encoder'), 0.0)
+            vision_encoder_lr = next((g['lr'] for g in optimizer.param_groups if g.get('name') == 'vision_encoder'), 0.0)
             peak_mem_gb = torch.cuda.max_memory_allocated() / (1024 ** 3) if 'cuda' in args.device else 0.0
             raw_model = model.module if isinstance(model, DistributedDataParallel) else model
             raw_model = getattr(raw_model, '_orig_mod', raw_model)
@@ -336,7 +388,7 @@ def train_epoch(epoch, loader, iters, start_step=0, swanlab=None):
             audio_scale = float(raw_model.talker.audio_scale.detach())
             seconds_per_step = spend_time / max(step - start_step, 1)
             eta_min = seconds_per_step * (iters - step) // 60
-            Logger(f'Epoch:[{epoch+1}/{args.epochs}]({step}/{iters}), loss:{current_loss:.4f} text:{text_loss_val:.4f} audio:{audio_loss_val:.4f} main:{main_codec_loss_val:.4f} residual:{residual_codec_loss_val:.4f} qlr:{qwen_lr:.2e} olr:{omni_lr:.2e} grad:{last_grad_norm:.2f} scale:{text_scale:.3f}/{audio_scale:.3f} seq:{input_ids.size(-1)} step:{seconds_per_step:.3f}s peak:{peak_mem_gb:.1f}GB eta:{eta_min:.0f}min')
+            Logger(f'Epoch:[{epoch+1}/{args.epochs}]({step}/{iters}), loss:{current_loss:.4f} text:{text_loss_val:.4f} audio:{audio_loss_val:.4f} main:{main_codec_loss_val:.4f} residual:{residual_codec_loss_val:.4f} qlr:{qwen_lr:.2e} olr:{omni_lr:.2e} aelr:{audio_encoder_lr:.2e} velr:{vision_encoder_lr:.2e} grad:{last_grad_norm:.2f} aegrad:{last_encoder_grad_norms["audio_encoder"]:.2f} vegrad:{last_encoder_grad_norms["vision_encoder"]:.2f} scale:{text_scale:.3f}/{audio_scale:.3f} seq:{input_ids.size(-1)} step:{seconds_per_step:.3f}s peak:{peak_mem_gb:.1f}GB eta:{eta_min:.0f}min')
             if swanlab:
                 metrics = {"loss": current_loss, "text_loss": text_loss_val,
                           "audio_loss": audio_loss_val, "qwen_lr": qwen_lr, "omni_lr": omni_lr,
@@ -345,7 +397,11 @@ def train_epoch(epoch, loader, iters, start_step=0, swanlab=None):
                           "grad_norm": last_grad_norm, "text_scale": text_scale,
                           "audio_scale": audio_scale, "peak_memory_gb": peak_mem_gb,
                           "sequence_length": input_ids.size(-1), "seconds_per_step": seconds_per_step,
-                          "epoch_time": eta_min}
+                          "epoch_time": eta_min,
+                          "audio_encoder_lr": audio_encoder_lr,
+                          "vision_encoder_lr": vision_encoder_lr,
+                          "audio_encoder_grad_norm": last_encoder_grad_norms['audio_encoder'],
+                          "vision_encoder_grad_norm": last_encoder_grad_norms['vision_encoder']}
                 if omni_config.audio_head_type == 'main_codec_predictor':
                     metrics.update({
                         f"residual_codec_loss_c{index + 1}": float(layer_loss.detach())
@@ -386,14 +442,6 @@ def train_epoch(epoch, loader, iters, start_step=0, swanlab=None):
         if args.max_steps > 0 and step >= args.max_steps:
             break
 
-    if last_step > start_step and last_step % args.accumulation_steps != 0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad(set_to_none=True)
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MiniQwen-Omni SFT")
     parser.add_argument("--save_dir", type=str, default="../out", help="模型保存目录")
@@ -402,6 +450,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32, help="batch size")
     parser.add_argument("--qwen_learning_rate", type=float, default=1e-5, help="Qwen Thinker初始学习率")
     parser.add_argument("--omni_learning_rate", type=float, default=5e-4, help="Talker/projector初始学习率")
+    parser.add_argument("--audio_encoder_learning_rate", type=float, default=1e-6, help="可训练SenseVoice encoder学习率")
+    parser.add_argument("--vision_encoder_learning_rate", type=float, default=1e-6, help="可训练SigLIP2 encoder学习率")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
     parser.add_argument("--dtype", type=str, default="bfloat16", help="混合精度类型")
     parser.add_argument("--num_workers", type=int, default=4, help="数据加载线程数")
@@ -418,6 +468,11 @@ if __name__ == "__main__":
     parser.add_argument('--accept_hidden_layer', default=14, type=int, help="接入的Qwen decoder block层号（1-based）")
     parser.add_argument('--audio_head_type', default='main_codec_predictor', type=str,
                         choices=['main_codec_predictor', 'legacy_parallel_delay'], help='Talker音频预测头')
+    parser.add_argument(
+        '--model_arch', default='production', type=str,
+        choices=['production'],
+        help='模型实现：Main codec + Code Predictor生产架构',
+    )
     parser.add_argument('--code_predictor_num_layers', default=2, type=int, help='帧内Code Predictor层数')
     parser.add_argument('--code_predictor_hidden_size', default=768, type=int, help='帧内Code Predictor隐藏维度')
     parser.add_argument('--residual_codec_loss_weight', default=0.3, type=float, help='Residual codec平均loss权重')
@@ -437,8 +492,11 @@ if __name__ == "__main__":
     parser.add_argument('--mode', default='all', type=str, choices=['all', 'audio_proj', 'vision_proj'], help="训练模式: all=全量训练, audio_proj=只训练audio_proj, vision_proj=只训练vision_proj")
     parser.add_argument(
         '--train_modules', default='', type=str,
-        help='显式解冻模块（逗号分隔）：all/thinker/text_head/talker/talker_core/speaker/audio_proj/vision_proj；非空时覆盖mode/freeze的冻结结果',
+        help='显式解冻模块（逗号分隔）：all/thinker/text_head/talker/talker_core/speaker/audio_proj/vision_proj/audio_encoder/vision_encoder；非空时覆盖mode/freeze的冻结结果',
     )
+    parser.add_argument('--train_audio_encoder', default=0, type=int, choices=[0, 1], help='注册并完整解冻SenseVoice encoder')
+    parser.add_argument('--train_vision_encoder', default=0, type=int, choices=[0, 1], help='注册并完整解冻SigLIP2 encoder')
+    parser.add_argument('--ddp_find_unused_parameters', default=0, type=int, choices=[0, 1], help='允许多模态batch存在未参与反向的已注册参数')
     parser.add_argument("--use_swanlab", action="store_true", help="是否使用swanlab")
     parser.add_argument("--swanlab_project", type=str, default="MiniQwen-Omni-SFT", help="SwanLab项目名")
     parser.add_argument("--swanlab_run_name", type=str, default="", help="SwanLab run名称")
@@ -446,6 +504,11 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_checkpointing", default=0, type=int, choices=[0, 1], help="Qwen梯度检查点")
     parser.add_argument("--dynamic_padding", default=1, type=int, choices=[0, 1], help="按batch裁掉全padding尾部（不删除有效token）")
     args = parser.parse_args()
+    requested_train_modules = {part.strip() for part in args.train_modules.split(',') if part.strip()}
+    if 'audio_encoder' in requested_train_modules and not args.train_audio_encoder:
+        parser.error('--train_modules audio_encoder requires --train_audio_encoder 1')
+    if 'vision_encoder' in requested_train_modules and not args.train_vision_encoder:
+        parser.error('--train_modules vision_encoder requires --train_vision_encoder 1')
 
     # ========== 1. 初始化环境和随机种子 ==========
     local_rank = init_distributed_mode()
@@ -455,8 +518,7 @@ if __name__ == "__main__":
     
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)
-    omni_config = OmniConfig.from_qwen_pretrained(
-        args.model_path,
+    config_overrides = dict(
         num_talker_hidden_layers=args.num_talker_hidden_layers,
         talker_hidden_size=args.talker_hidden_size,
         accept_hidden_layer=args.accept_hidden_layer,
@@ -470,6 +532,7 @@ if __name__ == "__main__":
         use_talker_ref_boundaries=bool(args.use_talker_ref_boundaries),
         max_images=args.max_images,
     )
+    omni_config = OmniConfig.from_qwen_pretrained(args.model_path, **config_overrides)
     ckp_data = omni_checkpoint(omni_config, weight=args.save_weight, save_dir=args.save_dir) if args.from_resume==1 else None
     if ckp_data and ckp_data.get('training_format_version') != TRAINING_FORMAT_VERSION:
         Logger('忽略旧版checkpoint：其token/MRoPE/Talker参考音频格式与当前训练格式不兼容，将从--from_weight重新开始')
@@ -494,7 +557,10 @@ if __name__ == "__main__":
                                         audio_encoder_path=args.audio_encoder_dir,
                                         vision_model_path=args.vision_dir,
                                         save_dir=args.save_dir, device=args.device,
-                                        freeze_backbone=args.freeze_backbone, from_resume=args.from_resume)
+                                        freeze_backbone=args.freeze_backbone, from_resume=args.from_resume,
+                                        train_audio_encoder=bool(args.train_audio_encoder),
+                                        train_vision_encoder=bool(args.train_vision_encoder),
+                                        model_arch=args.model_arch)
     
     if args.gradient_checkpointing == 1:
         model.gradient_checkpointing_enable()
@@ -542,15 +608,24 @@ if __name__ == "__main__":
     
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
-    qwen_params, omni_params = [], []
+    qwen_params, omni_params, audio_encoder_params, vision_encoder_params = [], [], [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
         clean_name = name.removeprefix('_orig_mod.')
-        (qwen_params if clean_name.startswith('model.') or clean_name.startswith('lm_head.') else omni_params).append(param)
+        if clean_name.startswith('audio_encoder.'):
+            audio_encoder_params.append(param)
+        elif clean_name.startswith('vision_encoder.'):
+            vision_encoder_params.append(param)
+        elif clean_name.startswith('model.') or clean_name.startswith('lm_head.'):
+            qwen_params.append(param)
+        else:
+            omni_params.append(param)
     param_groups = []
     if qwen_params: param_groups.append({'params': qwen_params, 'lr': args.qwen_learning_rate, 'base_lr': args.qwen_learning_rate, 'name': 'qwen'})
     if omni_params: param_groups.append({'params': omni_params, 'lr': args.omni_learning_rate, 'base_lr': args.omni_learning_rate, 'name': 'omni'})
+    if audio_encoder_params: param_groups.append({'params': audio_encoder_params, 'lr': args.audio_encoder_learning_rate, 'base_lr': args.audio_encoder_learning_rate, 'name': 'audio_encoder'})
+    if vision_encoder_params: param_groups.append({'params': vision_encoder_params, 'lr': args.vision_encoder_learning_rate, 'base_lr': args.vision_encoder_learning_rate, 'name': 'vision_encoder'})
     optimizer = optim.AdamW(param_groups)
     
     # ========== 6. 从ckp恢复状态 ==========
@@ -576,7 +651,11 @@ if __name__ == "__main__":
     
     # ========== 7. DDP包模型 ==========
     if dist.is_initialized():
-        model = DistributedDataParallel(model, device_ids=[local_rank])
+        model = DistributedDataParallel(
+            model,
+            device_ids=[local_rank],
+            find_unused_parameters=bool(args.ddp_find_unused_parameters),
+        )
     
     # ========== 8. 开始训练 ==========
     for epoch in range(start_epoch, args.epochs):

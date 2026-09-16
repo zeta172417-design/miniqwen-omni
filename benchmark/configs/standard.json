@@ -1,0 +1,26 @@
+{
+  "name": "omni-objective-standard-v1",
+  "seed": 20260913,
+  "counts": {
+    "arc_easy": 200,
+    "boolq": 150,
+    "piqa": 150,
+    "librispeech_clean": 250,
+    "librispeech_other": 250,
+    "mmbench_en": 350,
+    "pope": 150,
+    "textvqa": 0,
+    "spoken_mcq": 300,
+    "instruction": 200,
+    "robustness": 200
+  },
+  "sources": {
+    "arc_easy": "allenai/ai2_arc",
+    "boolq": "google/boolq",
+    "piqa": "extraordinarylab/piqa",
+    "librispeech": "openslr/librispeech_asr",
+    "mmbench_en": "lmms-lab/MMBench_EN",
+    "pope": "vikhyatk/POPE",
+    "textvqa": "vllm-ascend/textvqa-lite"
+  }
+}

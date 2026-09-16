@@ -6,6 +6,7 @@ PYTHON=${ARCH_EVAL_PYTHON:-${PROJECT_ROOT}/envs/Omni-ppu/bin/python}
 TORCHRUN=${ARCH_EVAL_TORCHRUN:-${PROJECT_ROOT}/envs/Omni-ppu/bin/torchrun}
 MODEL_PATH=${ARCH_EVAL_MODEL_PATH:-${PROJECT_ROOT}/model/Qwen3-0.6B}
 DATA_DIR=${ARCH_EVAL_DATA_DIR:-${PROJECT_ROOT}/dataset/arch_eval}
+HOLDOUT_DATA_DIR=${ARCH_EVAL_HOLDOUT_DATA_DIR:-${PROJECT_ROOT}/dataset/arch_eval_holdout}
 EXPERIMENT_NAME=${ARCH_EVAL_NAME:-main_codec_cp_2l_v1}
 OUTPUT_ROOT=${PROJECT_ROOT}/out
 OUTPUT_NAME=arch_eval/${EXPERIMENT_NAME}
@@ -98,6 +99,27 @@ build_report() {
     --checkpoint "${CHECKPOINT}"
 }
 
+evaluate_holdout() {
+  echo "Preparing/evaluating full-corpus holdout..."
+  "${PYTHON}" "${PROJECT_ROOT}/scripts/prepare_arch_eval_data.py" \
+    --output-dir "${HOLDOUT_DATA_DIR}"
+  if [[ -f "${RESULT_ROOT}/holdout-final.json" ]] && \
+     [[ -f "${RESULT_ROOT}/holdout_manifest.json" ]] && \
+     cmp -s "${HOLDOUT_DATA_DIR}/manifest.json" "${RESULT_ROOT}/holdout_manifest.json"; then
+    echo "Full-corpus holdout already evaluated"
+    return
+  fi
+  cleanup_dataset_cache
+  CUDA_VISIBLE_DEVICES="${EVAL_DEVICE}" "${PYTHON}" "${PROJECT_ROOT}/trainer/eval_arch.py" \
+    --checkpoint "${CHECKPOINT}" \
+    --data-dir "${HOLDOUT_DATA_DIR}" \
+    --output "${RESULT_ROOT}/holdout-final.json" \
+    --stage "holdout-final" \
+    --batch-size "${EVAL_BATCH_SIZE}" \
+    --max-samples "${EVAL_MAX_SAMPLES}"
+  cp "${HOLDOUT_DATA_DIR}/manifest.json" "${RESULT_ROOT}/holdout_manifest.json"
+}
+
 SWANLAB_ARGS=()
 if [[ "${USE_SWANLAB}" == "1" ]]; then
   SWANLAB_ARGS=(--use_swanlab --swanlab_project MiniQwen-Omni-ArchEval)
@@ -112,6 +134,7 @@ COMMON_ARGS=(
   --num_talker_hidden_layers "${NUM_TALKER_LAYERS}"
   --talker_hidden_size "${TALKER_HIDDEN_SIZE}"
   --accept_hidden_layer "${ACCEPT_HIDDEN_LAYER}"
+  --model_arch production
   --audio_head_type main_codec_predictor
   --code_predictor_num_layers 2
   --code_predictor_hidden_size 768
@@ -243,6 +266,10 @@ if (( COMPLETED_STAGE >= 4 )) && [[ "${RUN_GENERATION}" == "1" ]] && [[ ! -f "${
     --model "${PROJECT_ROOT}/model/SenseVoiceSmall" \
     --output "${RESULT_ROOT}/speech_metrics.json"
   touch "${RESULT_ROOT}/generation.done"
+fi
+
+if (( COMPLETED_STAGE >= 4 )); then
+  evaluate_holdout
 fi
 
 build_report

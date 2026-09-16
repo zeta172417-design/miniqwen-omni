@@ -1,3 +1,10 @@
+"""Production V0.1 MiniQwen-Omni architecture.
+
+Main codec + two-layer Code Predictor with mean fusion of the previous complete
+eight-code Mimi frame. Keep this file checkpoint-compatible with the 16-PPU
+full-dataset run.
+"""
+
 import os, math, torch, soundfile as sf, librosa, warnings, numpy as np, onnxruntime as ort, logging, contextlib, io
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -424,7 +431,12 @@ class MiniQwenOmni(Qwen3ForCausalLM):
             valid_lens = audio_lens[batch_mask].to(valid_fbank.device)
         else:
             valid_lens = torch.tensor([valid_fbank.size(1)] * valid_fbank.size(0), device=valid_fbank.device)
-        with torch.no_grad():
+        encoder_context = (
+            contextlib.nullcontext()
+            if getattr(self, '_train_audio_encoder', False)
+            else torch.no_grad()
+        )
+        with encoder_context:
             emb, _ = self.audio_encoder(valid_fbank, valid_lens)
         proj_dtype = next(self.audio_proj.parameters()).dtype
         emb_list = [self.audio_proj(emb[i, :max(1, min(valid_lens[i].item(), emb.size(1)))].unsqueeze(0).to(proj_dtype)).squeeze(0) for i in range(emb.size(0))]
@@ -487,7 +499,12 @@ class MiniQwenOmni(Qwen3ForCausalLM):
             pixel_attention_mask = image_inputs.get('pixel_attention_mask')
             if pixel_attention_mask is not None and not pixel_attention_mask.any():
                 return pv.new_zeros(pv.size(0), self.config.image_token_len, self.config.image_hidden_size)
-        with torch.no_grad():
+        encoder_context = (
+            contextlib.nullcontext()
+            if getattr(self, '_train_vision_encoder', False)
+            else torch.no_grad()
+        )
+        with encoder_context:
             outputs = self.vision_encoder(**image_inputs)
         return outputs.last_hidden_state
 
@@ -501,7 +518,13 @@ class MiniQwenOmni(Qwen3ForCausalLM):
                 pixel_values.size(0), self.config.image_token_len, self.config.hidden_size,
                 dtype=proj_dtype, device=pixel_values.device,
             )
-        with torch.no_grad(): emb = self.vision_encoder(pixel_values=pixel_values[mask]).last_hidden_state
+        encoder_context = (
+            contextlib.nullcontext()
+            if getattr(self, '_train_vision_encoder', False)
+            else torch.no_grad()
+        )
+        with encoder_context:
+            emb = self.vision_encoder(pixel_values=pixel_values[mask]).last_hidden_state
         if emb.dim() == 2: emb = emb.unsqueeze(0)
         # The frozen SigLIP encoder is intentionally kept in FP32, while
         # inference/evaluation may load the trainable MiniQwen modules in

@@ -4,10 +4,11 @@ This pipeline is a fixed-data, fixed-seed gate for comparing Talker, bridge and
 multimodal architecture changes. It is separate from `trainer/train.sh` and
 never writes to `out/miniqwen_omni_full`.
 
-## Preserved pre-MRoPE baseline
+## Archived pre-MRoPE baseline
 
-The completed `baseline_6l` experiment is retained read-only for comparison.
-Do not rerun it with the format-v4 code.
+The completed `baseline_6l` metrics and generated-sample report are retained
+read-only for comparison. Its heavyweight checkpoint has been removed after
+the result was recorded. Do not rerun it with the format-v4 code.
 
 ## Format-v5 Main codec + Code Predictor candidate
 
@@ -20,15 +21,20 @@ bash trainer/train_arch_eval.sh
 The default experiment name is `main_codec_cp_2l_v1`. It starts from
 Qwen3-0.6B, retains the completed `mrope_special_multiimage_v1` architecture,
 and replaces only the delayed eight-head codec output with a same-frame Main
-codec head plus a 2 × 768 Code Predictor. The report compares against
-`mrope_special_multiimage_v1` by default.
+codec head plus a 2 × 768 Code Predictor. This completed experiment is the
+V0.1 baseline; later candidate reports compare against
+`main_codec_cp_2l_v1` by default on the full-corpus holdout.
 
 T2A and A2A directly reuse the complete `sft_t2a_mini.parquet` and
-`sft_a2a_mini.parquet`; no duplicate training parquet is created. Their fixed
-English dev samples are drawn from those mini sources. I2T uses 32,768 English
-training samples and 512 group-disjoint English dev samples. Prepared dev/I2T
-data is stored under `dataset/arch_eval`; every later architecture candidate
-reuses those exact parquet files.
+`sft_a2a_mini.parquet`; no duplicate training parquet is created. The primary
+English evaluation is instead sampled from the full corpora into
+`dataset/arch_eval_holdout`: T2A excludes every conversation seen in mini
+training, A2A excludes every mini-training speaker embedding, and I2T excludes
+train-image hashes. The report records source counts, group keys, zero-overlap
+checks and example rows. MiniMind's fixed local audio/image prompts remain as
+the qualitative listening demo; they are not used as the quantitative gate.
+I2T training still uses the fixed 32,768-row English subset in
+`dataset/arch_eval`.
 
 The five stages are:
 
@@ -93,9 +99,12 @@ Per-stage deterministic metrics and generated samples:
 .runtime/arch_eval/<experiment>/
 ```
 
-Every stage refreshes `.runtime/arch_eval/<experiment>/REPORT.md`. The report
-contains the full metric table and automatically compares completed candidates
-with `mrope_special_multiimage_v1`. When qualitative generation is enabled, it also embeds the
+Every stage refreshes `.runtime/arch_eval/<experiment>/REPORT.md`. A completed
+pipeline additionally writes `holdout-final.json`; its full-corpus holdout
+section is the primary architecture-selection gate, while the historical
+per-stage table is a training-domain diagnostic. The report automatically
+compares completed candidates with the configured baseline when their holdout
+manifests match. When qualitative generation is enabled, it also embeds the
 input image/audio, Thinker response, playable Talker MP3 files, generation RTF,
 SenseVoice transcription and generated-speech/text WER.
 
@@ -115,3 +124,8 @@ The active experiment keeps one overwrite-style checkpoint at
 `out/arch_eval/<experiment>/checkpoint`. After recording metrics and listening
 to generated samples, an old candidate checkpoint can be removed while keeping
 the much smaller `.runtime/arch_eval/<experiment>` report.
+
+The recorded `baseline_6l`, `mrope_special_multiimage_v1`, and
+`main_codec_cp_2l_v1` reports are currently archived this way; their
+`out/arch_eval` checkpoints are intentionally absent. The abandoned encoder
+unfreeze candidate and its partial checkpoint are not part of the V0.1 release.

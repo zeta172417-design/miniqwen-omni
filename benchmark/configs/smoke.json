@@ -1,0 +1,9 @@
+{
+  "run_id": "smoke-v1",
+  "manifest": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/benchmark/data/smoke.jsonl",
+  "output_root": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-results",
+  "seed": 20260913,
+  "models": [
+    {"id": "mock", "adapter": "benchmark.adapters.mock:MockAdapter", "kwargs": {}}
+  ]
+}
