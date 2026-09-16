@@ -67,11 +67,11 @@ V0 保留在 `peachPPP/MiniQwen-Omni`，不得用后续版本覆盖。V0.1 使�
 
 ```bash
 modelscope create peachPPP/MiniQwen-Omni-V0.1 \
-  --repo-type model \
+  --repo_type model \
   --visibility private \
   --license 'Apache License 2.0' \
   --description 'Qwen3-0.6B based text/audio/vision Omni model' \
-  --exist-ok
+  --exist_ok
 
 modelscope upload peachPPP/MiniQwen-Omni-V0.1 \
   releases/miniqwen-omni-bf16 \
@@ -80,7 +80,9 @@ modelscope upload peachPPP/MiniQwen-Omni-V0.1 \
   --max-workers 4
 ```
 
-ModelScope 1.37.0 的 `upload` 子命令没有 `--use-cache` 或 `--sync` 参数，不要添加这两个选项。上传中断时，在确认 repo ID 正确后重新执行同一条 `modelscope upload` 命令。
+ModelScope 1.37.0 的 `create` 使用下划线参数 `--repo_type` / `--exist_ok`，而
+`upload` 使用连字符参数 `--repo-type`。`upload` 没有 `--use-cache` 或 `--sync`
+参数，不要添加。上传中断时，在确认 repo ID 正确后重新执行同一条命令。
 
 ## 4. 下载验证
 
