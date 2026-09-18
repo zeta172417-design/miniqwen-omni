@@ -89,6 +89,16 @@ class MiniOmni2Adapter(ModelAdapter):
             get_input_ids_whisper, get_input_ids_whisper_ATBatch, load_audio,
         )
 
+        if len(sample.image_paths) > 1:
+            return GenerationResult(
+                sample.sample_id, self.model_id, status="unsupported",
+                error="Mini-Omni2 public inference does not support multi-image input",
+            )
+        if sample.task == "text_regression" or (sample.image_paths and not sample.audio):
+            return GenerationResult(
+                sample.sample_id, self.model_id, status="unsupported",
+                error="Mini-Omni2 public API has no text-only vision/text response path",
+            )
         torch.manual_seed(seed)
         self._audio_decode_invalid = False
         output = str(self.output_dir / f"{sample.sample_id}.wav")
@@ -99,7 +109,12 @@ class MiniOmni2Adapter(ModelAdapter):
                 if not sample.audio:
                     raise ValueError("Mini-Omni2 vision evaluation requires a spoken question")
                 chunks = self.engine.run_vision_AA_batch_stream(
-                    sample.audio, sample.image, max_returned_tokens=self.max_new_tokens, top_k=1, save_path=output,
+                    sample.audio, sample.image,
+                    # Upstream interprets this as input audio tokens + newly
+                    # generated tokens, not as a text-only output budget. The
+                    # benchmark's MCQ limit (32) is therefore invalid here.
+                    max_returned_tokens=self.max_new_tokens,
+                    top_k=1, save_path=output,
                 )
                 text = "".join(text_chunk for _, text_chunk in chunks).strip()
             elif sample.audio:
@@ -154,5 +169,5 @@ class MiniOmni2Adapter(ModelAdapter):
         peak = torch.cuda.max_memory_allocated() / 2**30 if self.device.startswith("cuda") else None
         return GenerationResult(
             sample.sample_id, self.model_id, text, output, elapsed,
-            peak_memory_gb=peak, status="ok" if text else "empty_text",
+            peak_memory_gb=peak, status="ok" if text or output else "empty_output",
         )

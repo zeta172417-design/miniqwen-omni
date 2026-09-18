@@ -288,23 +288,30 @@ class CodePredictor(nn.Module):
 
     @torch.inference_mode()
     def generate(self, talker_hidden, first_code, sample_fn, temperature=1.0, top_k=50, top_p=0.8):
-        if talker_hidden.size(0) != 1 or first_code.numel() != 1:
-            raise ValueError("cached Code Predictor generation currently supports batch size 1")
-        first_embedding = self.codec_embedding.codebook(0, first_code.reshape(1)).unsqueeze(1)
+        batch_size = talker_hidden.size(0)
+        first_code = first_code.reshape(-1)
+        if first_code.numel() != batch_size:
+            raise ValueError("first_code must contain one Main codec per Talker hidden state")
+        first_embedding = self.codec_embedding.codebook(0, first_code).unsqueeze(1)
         hidden_states, cache = self._run(
             torch.cat((talker_hidden.unsqueeze(1), first_embedding), dim=1),
             use_cache=True,
         )
-        codes = [int(first_code.item())]
+        codes = [first_code.long()]
         current = hidden_states[:, -1]
         for index in range(7):
-            code = sample_fn(self.heads[index](current)[0], temperature, top_k, top_p)
+            logits = self.heads[index](current)
+            code = torch.tensor(
+                [sample_fn(logits[row], temperature, top_k, top_p) for row in range(batch_size)],
+                dtype=torch.long,
+                device=talker_hidden.device,
+            )
             codes.append(code)
             if index == 6:
                 break
             embedding = self.codec_embedding.codebook(
                 index + 1,
-                torch.tensor([code], dtype=torch.long, device=talker_hidden.device),
+                code,
             ).unsqueeze(1)
             hidden_states, cache = self._run(
                 embedding,
@@ -313,7 +320,8 @@ class CodePredictor(nn.Module):
                 use_cache=True,
             )
             current = hidden_states[:, -1]
-        return codes
+        frames = torch.stack(codes, dim=1)
+        return frames[0].tolist() if batch_size == 1 else frames.tolist()
 
 class SenseVoiceAudioProcessor:
     def __init__(self, frontend): self.frontend = frontend
@@ -830,7 +838,7 @@ class MiniQwenOmni(Qwen3ForCausalLM):
         return tokens[-1] if tokens else input_ids
 
     @staticmethod
-    def _sample_from_logits(logits, temperature=1.0, top_k=0, top_p=1.0):
+    def _sample_from_logits(logits, temperature=1.0, top_k=0, top_p=1.0, generator=None):
         logits = logits.float().clone() / max(float(temperature), 1e-9)
         if top_k and top_k > 0:
             candidate_logits, candidate_ids = torch.topk(logits, min(int(top_k), logits.numel()))
@@ -838,14 +846,223 @@ class MiniQwenOmni(Qwen3ForCausalLM):
                 mask = torch.cumsum(F.softmax(candidate_logits, dim=-1), dim=-1) > top_p
                 mask[1:], mask[0] = mask[:-1].clone(), False
                 candidate_logits[mask] = -float('inf')
-            sampled = torch.multinomial(F.softmax(candidate_logits, dim=-1), 1)
+            sampled = torch.multinomial(F.softmax(candidate_logits, dim=-1), 1, generator=generator)
             return int(candidate_ids[sampled].item())
         if top_p and top_p < 1.0:
             sorted_logits, sorted_ids = torch.sort(logits, descending=True)
             mask = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1) > top_p
             mask[1:], mask[0] = mask[:-1].clone(), False
             logits[sorted_ids[mask]] = -float('inf')
-        return int(torch.multinomial(F.softmax(logits, dim=-1), 1).item())
+        return int(torch.multinomial(F.softmax(logits, dim=-1), 1, generator=generator).item())
+
+    @torch.inference_mode()
+    def batch_generate(self, input_ids, attention_mask=None, eos_token_id=None,
+                       max_new_tokens=1024, temperature=None, top_p=None, top_k=None,
+                       rp=1., use_cache=True, return_audio_codes=False, seeds=None, **args):
+        """Batched non-streaming generation for the production Main-codec path.
+
+        The existing ``generate(stream=True)`` contract remains unchanged for
+        interactive use. This method keeps per-sample text/audio completion
+        state while sharing Thinker, Talker and Code Predictor forward passes.
+        """
+        if getattr(self.config, "audio_head_type", "legacy_parallel_delay") != "main_codec_predictor":
+            raise NotImplementedError("native batching is only available for main_codec_predictor")
+        if input_ids.ndim != 2:
+            raise ValueError(f"input_ids must be (B,T), got {tuple(input_ids.shape)}")
+        batch_size, prompt_length = input_ids.shape
+        if batch_size < 1:
+            return []
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+        if attention_mask.shape != input_ids.shape:
+            raise ValueError("attention_mask must match input_ids")
+
+        eos_token_id = self.generation_config.eos_token_id if eos_token_id is None else eos_token_id
+        temperature = self.generation_config.temperature if temperature is None else temperature
+        top_p = self.generation_config.top_p if top_p is None else top_p
+        top_k = self.generation_config.top_k if top_k is None else top_k
+        eos_ids = {eos_token_id} if isinstance(eos_token_id, int) else set(eos_token_id)
+        seeds = list(seeds or [0] * batch_size)
+        if len(seeds) != batch_size:
+            raise ValueError("seeds must contain one value per sample")
+        generators = []
+        for seed in seeds:
+            generator = torch.Generator(device=input_ids.device)
+            generator.manual_seed(int(seed))
+            generators.append(generator)
+
+        if self.config.use_mrope:
+            prompt_position_ids, _ = self.build_mrope_position_ids(input_ids, attention_mask)
+            next_positions = []
+            for row in range(batch_size):
+                valid = attention_mask[row].bool()
+                next_positions.append(int(prompt_position_ids[:, row, valid].max().item()) + 1)
+            next_positions = torch.tensor(next_positions, dtype=torch.long, device=input_ids.device)
+        else:
+            prompt_position_ids = attention_mask.long().cumsum(-1).sub(1).clamp_min(0)
+            next_positions = attention_mask.sum(-1).long()
+
+        histories = [input_ids[row, attention_mask[row].bool()].tolist() for row in range(batch_size)]
+        generated_tokens = [[] for _ in range(batch_size)]
+        audio_frames = [[] for _ in range(batch_size)]
+        text_finished = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+        audio_finished = torch.full(
+            (batch_size,), not bool(return_audio_codes), dtype=torch.bool, device=input_ids.device,
+        )
+        audio_started = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+        first_text_drain = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
+        open_thinking = bool(args.get("open_thinking", False))
+        thinking_end_seen = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+        first_text_seconds = [None] * batch_size
+        first_audio_seconds = [None] * batch_size
+        completed_seconds = [None] * batch_size
+
+        full_attention_mask = attention_mask.long()
+        audio_buffer = None
+        if return_audio_codes:
+            audio_buffer = torch.full(
+                (batch_size, 8, prompt_length), self.audio_pad_token,
+                dtype=torch.long, device=input_ids.device,
+            )
+            if args.get("ref_codes") is not None or args.get("spk_emb") is not None:
+                raise NotImplementedError("batched reference-voice conditioning is not implemented")
+
+        import time
+        started_at = time.perf_counter()
+        past_kvs = None
+        current_text = input_ids
+        current_positions = prompt_position_ids
+        forward_args = dict(args)
+        forward_args.pop("output_audio_logits", None)
+        forward_args.pop("logits_to_keep", None)
+
+        for _ in range(max_new_tokens):
+            if return_audio_codes:
+                model_input = torch.cat((audio_buffer, current_text.unsqueeze(1)), dim=1)
+            else:
+                model_input = current_text
+            out = self.forward(
+                model_input,
+                attention_mask=full_attention_mask,
+                talker_attention_mask=full_attention_mask if return_audio_codes else None,
+                position_ids=current_positions,
+                past_key_values=past_kvs,
+                use_cache=use_cache,
+                logits_to_keep=1,
+                output_audio_logits=bool(return_audio_codes),
+                **forward_args,
+            )
+            past_kvs = out.past_key_values
+            now = time.perf_counter()
+
+            next_text_values = []
+            for row in range(batch_size):
+                if text_finished[row]:
+                    token = args.get("newline_token_id") if first_text_drain[row] else args.get(
+                        "pad_token_id", self.config.pad_token_id
+                    )
+                    if token is None:
+                        raise ValueError("newline_token_id is required while draining Talker audio")
+                    first_text_drain[row] = False
+                else:
+                    logits = out.logits[row, -1].clone()
+                    if rp != 1.0:
+                        seen = list(set(histories[row]))
+                        scores = logits[seen]
+                        logits[seen] = torch.where(scores > 0, scores / rp, scores * rp)
+                    token = self._sample_from_logits(
+                        logits, temperature, top_k, top_p, generator=generators[row],
+                    )
+                    generated_tokens[row].append(token)
+                    histories[row].append(token)
+                    first_text_seconds[row] = first_text_seconds[row] or now - started_at
+                    if token in eos_ids:
+                        text_finished[row] = True
+                next_text_values.append(int(token))
+
+            next_audio = None
+            if return_audio_codes:
+                next_audio = torch.full(
+                    (batch_size, 8, 1), self.audio_pad_token,
+                    dtype=torch.long, device=input_ids.device,
+                )
+                for row in range(batch_size):
+                    audio_start_eligible = not open_thinking or bool(thinking_end_seen[row])
+                    if open_thinking and self.config.think_end_ids:
+                        marker = list(self.config.think_end_ids)
+                        thinking_end_seen[row] |= generated_tokens[row][-len(marker):] == marker
+
+                    frame = None
+                    if audio_started[row] and not audio_finished[row]:
+                        main_logits = out.main_audio_logits[row, -1].clone()
+                        masked = torch.full_like(main_logits, -float("inf"))
+                        masked[:self.config.audio_codebook_size] = main_logits[:self.config.audio_codebook_size]
+                        masked[self.audio_stop_token] = main_logits[self.audio_stop_token]
+                        c0 = self._sample_from_logits(
+                            masked,
+                            self.config.main_codec_temperature,
+                            self.config.main_codec_top_k,
+                            self.config.main_codec_top_p,
+                            generator=generators[row],
+                        )
+                        if c0 == self.audio_stop_token:
+                            audio_finished[row] = True
+                        else:
+                            def sample_residual(logits, residual_temperature, residual_top_k, residual_top_p):
+                                return self._sample_from_logits(
+                                    logits, residual_temperature, residual_top_k, residual_top_p,
+                                    generator=generators[row],
+                                )
+                            frame = self.talker.code_predictor.generate(
+                                out.talker_hidden_states[row:row + 1, -1],
+                                torch.tensor([c0], dtype=torch.long, device=input_ids.device),
+                                sample_residual,
+                                temperature=self.config.residual_codec_temperature,
+                                top_k=self.config.residual_codec_top_k,
+                                top_p=self.config.residual_codec_top_p,
+                            )
+                            audio_frames[row].append(frame)
+                            first_audio_seconds[row] = first_audio_seconds[row] or now - started_at
+                    if frame is not None:
+                        next_audio[row, :, 0] = torch.tensor(frame, device=input_ids.device)
+                    elif not audio_started[row] and (audio_start_eligible or text_finished[row]):
+                        next_audio[row, 0, 0] = self.audio_bos_token
+                        audio_started[row] = True
+
+            finished = text_finished & audio_finished
+            for row in range(batch_size):
+                if finished[row] and completed_seconds[row] is None:
+                    completed_seconds[row] = now - started_at
+            if bool(finished.all()):
+                break
+
+            current_text = torch.tensor(
+                next_text_values, dtype=torch.long, device=input_ids.device,
+            ).unsqueeze(1)
+            if return_audio_codes:
+                audio_buffer = next_audio
+            full_attention_mask = torch.cat((
+                full_attention_mask,
+                torch.ones((batch_size, 1), dtype=full_attention_mask.dtype, device=input_ids.device),
+            ), dim=1)
+            if self.config.use_mrope:
+                current_positions = next_positions.view(1, batch_size, 1).expand(3, -1, -1)
+            else:
+                current_positions = next_positions.view(batch_size, 1)
+            next_positions = next_positions + 1
+
+        total_seconds = time.perf_counter() - started_at
+        return [
+            {
+                "token_ids": generated_tokens[row],
+                "audio_frames": audio_frames[row],
+                "latency_seconds": completed_seconds[row] or total_seconds,
+                "first_token_seconds": first_text_seconds[row],
+                "first_audio_seconds": first_audio_seconds[row],
+                "batch_wall_seconds": total_seconds,
+            }
+            for row in range(batch_size)
+        ]
 
     def stream_generate(self, input_ids, eos_token_id, max_new_tokens, temperature, top_p, top_k, rp, use_cache, return_audio_codes=False, **args):
         if getattr(self.config, "audio_head_type", "legacy_parallel_delay") == "legacy_parallel_delay":

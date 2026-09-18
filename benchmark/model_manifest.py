@@ -54,6 +54,11 @@ def main():
                 "code_remote": git_value(mini_source, "remote", "get-url", "origin"),
                 "files": files(root / "mini-omni2/checkpoint"),
             },
+            "MiniMind-3O-MoE": {
+                "source": "local Hugging Face snapshot",
+                "revision": "ae90b1f02858ed2f7ba7c7abb0881af30618b325",
+                "files": files(root / "minimind-3o-moe"),
+            },
             "MiniQwen-Omni": {
                 "source": str(miniqwen.resolve()),
                 "code_commit": git_value(miniqwen, "rev-parse", "HEAD"),

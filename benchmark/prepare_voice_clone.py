@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import random
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -14,13 +15,18 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 import soundfile as sf
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from benchmark.metrics import naturalize_tts_text, normalize_asr_text
+
 
 DEFAULT_ARROW = (
     "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/modelscope-cache/"
     "openslr___librispeech_asr/clean-e26c7aa5cc2ad4f5/0.0.0/master/"
     "librispeech_asr-test.arrow"
 )
-DEFAULT_OUTPUT = "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/voice-clone-v1"
+DEFAULT_OUTPUT = "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/voice-clone-v2.3-standard"
 
 
 def duration(audio_bytes: bytes) -> float:
@@ -38,6 +44,12 @@ def select_rows(rows: list[dict], speakers: int, targets: int, seed: int) -> lis
         seconds = duration(audio_bytes)
         if 2.0 <= seconds <= 10.0 and 4 <= len(text.split()) <= 28:
             grouped[str(row["speaker_id"])].append({**row, "text": text, "duration": seconds})
+
+    for speaker, items in grouped.items():
+        unique = {}
+        for item in items:
+            unique.setdefault(normalize_asr_text(item["text"]), item)
+        grouped[speaker] = list(unique.values())
 
     eligible = [speaker for speaker, items in grouped.items() if len(items) >= targets + 1]
     random.Random(seed).shuffle(eligible)
@@ -57,9 +69,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arrow", default=DEFAULT_ARROW)
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
-    parser.add_argument("--speakers", type=int, default=12)
-    parser.add_argument("--targets-per-speaker", type=int, default=4)
+    parser.add_argument("--speakers", type=int, default=8)
+    parser.add_argument("--targets-per-speaker", type=int, default=2)
     parser.add_argument("--seed", type=int, default=20260914)
+    parser.add_argument("--exclude-manifest", default=None)
     args = parser.parse_args()
 
     arrow_path = Path(args.arrow).resolve()
@@ -71,6 +84,20 @@ def main() -> None:
     with pa.memory_map(str(arrow_path), "r") as source:
         for batch in ipc.open_stream(source):
             rows.extend(batch.to_pylist())
+    if args.exclude_manifest:
+        excluded = set()
+        for line in Path(args.exclude_manifest).read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            sample = json.loads(line)
+            for value in (
+                sample.get("reference"), sample.get("prompt"),
+                sample.get("metadata", {}).get("transcript_prompt"),
+                sample.get("metadata", {}).get("target_text"),
+            ):
+                if isinstance(value, str) and value.strip():
+                    excluded.add(normalize_asr_text(value))
+        rows = [row for row in rows if normalize_asr_text(row.get("text")) not in excluded]
     selected = select_rows(rows, args.speakers, args.targets_per_speaker, args.seed)
 
     manifest_rows = []
@@ -90,7 +117,7 @@ def main() -> None:
                 "ref_audio": str(reference_path),
                 "ref_text": reference["text"],
                 "ref_duration_seconds": reference["duration"],
-                "target_text": target["text"],
+                "target_text": naturalize_tts_text(target["text"]),
                 "label_audio": str(label_path),
                 "label_duration_seconds": target["duration"],
                 "source_id": target["id"],
@@ -102,7 +129,7 @@ def main() -> None:
     payload = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in manifest_rows)
     manifest.write_text(payload, encoding="utf-8")
     metadata = {
-        "name": "miniqwen-voice-clone-v1",
+        "name": "omni-voice-clone-v2.3",
         "source": "openslr/librispeech_asr:clean:test",
         "seed": args.seed,
         "speakers": args.speakers,

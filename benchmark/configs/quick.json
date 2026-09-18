@@ -1,0 +1,29 @@
+{
+  "name": "omni-core-v2.3-quick",
+  "profile": "quick",
+  "seed": 20260917,
+  "counts": {
+    "arc_easy": 2,
+    "boolq": 2,
+    "piqa": 2,
+    "spoken_qa": 12,
+    "librispeech_clean": 12,
+    "librispeech_other": 12,
+    "tts": 8,
+    "mmbench_en": 16,
+    "pope": 8,
+    "textvqa": 8,
+    "audio_vision": 8,
+    "nlvr2": 8
+  },
+  "sources": {
+    "arc_easy": "allenai/ai2_arc",
+    "boolq": "google/boolq",
+    "piqa": "extraordinarylab/piqa",
+    "librispeech": "openslr/librispeech_asr",
+    "mmbench_en": "lmms-lab/MMBench_EN",
+    "pope": "vikhyatk/POPE",
+    "textvqa_local_dir": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/hf-textvqa-validation",
+    "nlvr2": "lmms-lab/NLVR2"
+  }
+}

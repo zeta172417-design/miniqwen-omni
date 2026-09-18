@@ -1,9 +1,13 @@
 {
-  "run_id": "standard-v1",
-  "manifest": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/standard/manifest.jsonl",
+  "run_id": "omni-benchmark-v0-standard",
+  "manifest": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/omni-core-v2.3-standard/manifest.jsonl",
   "output_root": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-results",
   "seed": 20260913,
-  "tasks": ["text", "audio", "vision", "audio_vision", "robustness"],
+  "tasks": [
+    "asr_clean", "asr_other", "spoken_qa_a2t", "spoken_qa_a2a", "tts",
+    "vision_mmbench", "vision_pope", "vision_textvqa", "audio_vision",
+    "multi_image", "text_regression"
+  ],
   "models": [
     {
       "id": "miniqwen-v0",
@@ -24,6 +28,19 @@
       "adapter": "benchmark.adapters.miniqwen:MiniQwenAdapter",
       "kwargs": {
         "checkpoint": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/out/miniqwen_omni_full_main_codec_cp_v5/checkpoint",
+        "audio_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/SenseVoiceSmall",
+        "vision_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/siglip2-base-p32-256-ve",
+        "mimi": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/mimi",
+        "device": "cuda",
+        "return_audio": true
+      }
+    },
+    {
+      "id": "minimind-3o-moe",
+      "role": "0.3B MoE matched baseline",
+      "adapter": "benchmark.adapters.minimind3o:MiniMind3OAdapter",
+      "kwargs": {
+        "checkpoint": "/mnt/workspace/zhaozetao/multimodel/Omni/minimind-3o-moe",
         "audio_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/SenseVoiceSmall",
         "vision_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/siglip2-base-p32-256-ve",
         "mimi": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/mimi",

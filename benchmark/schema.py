@@ -14,6 +14,7 @@ class BenchmarkSample:
     reference: Any
     choices: list[str] = field(default_factory=list)
     image: str | None = None
+    images: list[str] = field(default_factory=list)
     audio: str | None = None
     perturbation: str = "clean"
     source: str = ""
@@ -23,6 +24,7 @@ class BenchmarkSample:
     def from_dict(cls, row: dict[str, Any], root: Path | None = None) -> "BenchmarkSample":
         values = {key: row.get(key) for key in cls.__dataclass_fields__}
         values["choices"] = values["choices"] or []
+        values["images"] = values["images"] or []
         values["metadata"] = values["metadata"] or {}
         values["perturbation"] = values["perturbation"] or "clean"
         values["source"] = values["source"] or ""
@@ -31,7 +33,18 @@ class BenchmarkSample:
                 value = values.get(key)
                 if value and not Path(value).is_absolute():
                     values[key] = str((root / value).resolve())
+            values["images"] = [
+                str((root / value).resolve()) if not Path(value).is_absolute() else value
+                for value in values["images"]
+            ]
         return cls(**values)
+
+    @property
+    def image_paths(self) -> list[str]:
+        """Return the canonical ordered image list with legacy compatibility."""
+        if self.images:
+            return list(self.images)
+        return [self.image] if self.image else []
 
 
 @dataclass

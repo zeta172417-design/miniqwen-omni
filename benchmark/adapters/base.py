@@ -18,5 +18,9 @@ class ModelAdapter(ABC):
     @abstractmethod
     def generate(self, sample: BenchmarkSample, seed: int) -> GenerationResult: ...
 
+    def generate_batch(self, samples: list[BenchmarkSample], seeds: list[int]) -> list[GenerationResult]:
+        """Generate a batch, with a sequential fallback for third-party adapters."""
+        return [self.generate(sample, seed) for sample, seed in zip(samples, seeds)]
+
     def close(self) -> None:
         return None

@@ -652,6 +652,24 @@ class MiniQwenOmniConfigTest(unittest.TestCase):
                 atol=1e-5, rtol=1e-5,
             ))
 
+    def test_code_predictor_cached_generation_supports_batches(self):
+        config = OmniConfig(
+            vocab_size=128, hidden_size=32, intermediate_size=64,
+            num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+            head_dim=8, max_position_embeddings=64,
+            talker_hidden_size=32, code_predictor_hidden_size=32,
+            code_predictor_num_layers=1, code_predictor_num_attention_heads=4,
+            code_predictor_num_key_value_heads=2, code_predictor_intermediate_size=64,
+            audio_vocab_size=2112, audio_codebook_size=2048,
+        )
+        predictor = CodePredictor(config, MimiCodecEmbedding(2112, 2048, 32)).eval()
+        frames = predictor.generate(
+            torch.randn(3, 32), torch.tensor([1, 2, 3]),
+            lambda logits, *_: int(logits.argmax()),
+        )
+        self.assertEqual(len(frames), 3)
+        self.assertTrue(all(len(frame) == 8 for frame in frames))
+
     def test_tiny_same_frame_model_forward_shapes(self):
         config = OmniConfig(
             vocab_size=128, hidden_size=32, intermediate_size=64,
@@ -726,6 +744,41 @@ class MiniQwenOmniConfigTest(unittest.TestCase):
             )
         self.assertEqual(reloaded.config.audio_head_type, 'main_codec_predictor')
         self.assertIsNotNone(reloaded.talker.code_predictor)
+
+    def test_same_frame_native_batch_generation(self):
+        config = OmniConfig(
+            vocab_size=128, hidden_size=32, intermediate_size=64,
+            num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+            head_dim=8, max_position_embeddings=64,
+            num_talker_hidden_layers=1, talker_hidden_size=32,
+            code_predictor_hidden_size=32, code_predictor_num_layers=1,
+            code_predictor_num_attention_heads=4,
+            code_predictor_num_key_value_heads=2,
+            code_predictor_intermediate_size=64,
+            audio_vocab_size=2112, audio_codebook_size=2048,
+            spk_emb_size=16, accept_hidden_layer=1,
+            use_mrope=False, audio_head_type='main_codec_predictor',
+            eos_token_id=2, pad_token_id=0, think_end_ids=[],
+        )
+        model = MiniQwenOmni(config, audio_encoder_path=None, vision_model_path=None).eval()
+        with torch.no_grad():
+            model.lm_head.weight.zero_()
+            model.talker.lm_head.weight.zero_()
+        model._sample_from_logits = (
+            lambda logits, temperature=1.0, top_k=0, top_p=1.0, generator=None:
+            int(logits.argmax())
+        )
+        outputs = model.batch_generate(
+            torch.tensor([[0, 1, 3], [1, 4, 5]], dtype=torch.long),
+            attention_mask=torch.tensor([[0, 1, 1], [1, 1, 1]], dtype=torch.long),
+            eos_token_id=2, max_new_tokens=2, temperature=1.0, top_p=1.0,
+            top_k=1, return_audio_codes=True, seeds=[7, 8],
+            newline_token_id=4, pad_token_id=0,
+        )
+        self.assertEqual(len(outputs), 2)
+        self.assertTrue(all(len(output['token_ids']) == 2 for output in outputs))
+        self.assertTrue(all(len(output['audio_frames']) == 1 for output in outputs))
+        self.assertTrue(all(len(output['audio_frames'][0]) == 8 for output in outputs))
 
     def test_main_codec_loss_formula_has_unweighted_eos(self):
         main_logits = torch.randn(1, 3, 2112, requires_grad=True)

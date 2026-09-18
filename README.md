@@ -166,9 +166,16 @@ python -m unittest tests.test_miniqwen_omni tests.test_web_demo tests.test_bench
 bash -n trainer/train.sh trainer/train_mini.sh scripts/serve_web.sh
 ```
 
-MiniQwen V0/V0.1、Mini-Omni2 和 Qwen2.5-Omni-3B 的统一英文客观评测见
-`BENCHMARK.md`。外部 benchmark 模型与数据统一位于同级 `Omni/` 目录，不在本
-代码仓库中重复保存。
+MiniQwen V0/V0.1、MiniMind-3O-MoE、Mini-Omni2 和 Qwen2.5-Omni-3B 的
+Omni Benchmark V0 见 `BENCHMARK.md`，首版正式结果摘要见
+`benchmark/reports/OMNI_BENCHMARK_V0.md`。该版本主要评测 ASR、语音理解、A2A、TTS、
+图像/多图理解、音频+图像融合和音色克隆；纯文本只保留32条防退化检查。快速与正式命令分别为
+`bash scripts/run_omni_benchmark.sh quick` 和
+`bash scripts/run_omni_benchmark.sh standard`。外部模型与数据统一位于同级
+`Omni/` 目录，不在本代码仓库中重复保存。
+
+后续架构实验统一以 MiniQwen-Omni V0.1（Main codec + Code Predictor）为基线，
+优先改进数据构成与七阶段训练流程；V0 parallel-delay checkpoint 仅保留用于历史对照。
 
 ## 来源与许可
 

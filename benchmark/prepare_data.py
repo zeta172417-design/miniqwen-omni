@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Prepare the fixed English standard manifest from ModelScope datasets."""
+"""Prepare the fixed English Omni Benchmark v2.3 manifests."""
 from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
+import os
+import pickle
 import random
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -16,13 +20,24 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from benchmark.metrics import normalize_text
+from benchmark.metrics import naturalize_tts_text, normalize_text
+
+
+BUILDER_VERSION = "2.3.0"
 
 
 def stable_rows(dataset, count: int, seed: int):
     indices = list(range(len(dataset)))
     random.Random(seed).shuffle(indices)
     return [dataset[index] for index in indices[:count]]
+
+
+def stable_iter(dataset, seed: int):
+    """Shuffle indices without decoding every image into a giant Python list."""
+    indices = list(range(len(dataset)))
+    random.Random(seed).shuffle(indices)
+    for index in indices:
+        yield dataset[index]
 
 
 def duration_seconds(path: str | Path) -> float:
@@ -38,41 +53,16 @@ def mcq_prompt(question: str, choices: list[str], context: str = "") -> str:
 
 def save_image(value: Any, path: Path) -> str:
     from PIL import Image
-    import io
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(value, Image.Image):
-        value.convert("RGB").save(path, quality=92)
+        image = value
     elif isinstance(value, dict) and value.get("bytes"):
-        Image.open(io.BytesIO(value["bytes"])).convert("RGB").save(path, quality=92)
+        image = Image.open(io.BytesIO(value["bytes"]))
     elif isinstance(value, dict) and value.get("path"):
-        Image.open(value["path"]).convert("RGB").save(path, quality=92)
-    elif isinstance(value, (str, Path)):
-        Image.open(value).convert("RGB").save(path, quality=92)
+        image = Image.open(value["path"])
     else:
-        raise ValueError(f"Unsupported image value: {type(value)}")
-    return str(path)
-
-
-def synthesize(text: str, path: Path, voice: str = "slt") -> str:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    signature = hashlib.sha256(f"flite-v1\0{voice}\0{text}".encode()).hexdigest()
-    signature_path = path.with_suffix(path.suffix + ".sha256")
-    if (
-        path.is_file()
-        and path.stat().st_size > 44
-        and signature_path.is_file()
-        and signature_path.read_text().strip() == signature
-    ):
-        return str(path)
-    text_path = path.with_suffix(".txt")
-    text_path.write_text(text, encoding="utf-8")
-    filter_value = f"flite=textfile='{text_path}':voice={voice}"
-    subprocess.run(
-        ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", filter_value, "-ar", "16000", "-ac", "1", str(path)],
-        check=True,
-    )
-    text_path.unlink()
-    signature_path.write_text(signature + "\n", encoding="utf-8")
+        image = Image.open(value)
+    image.convert("RGB").save(path, quality=92)
     return str(path)
 
 
@@ -85,226 +75,531 @@ def save_audio(value: Any, path: Path) -> str:
     elif isinstance(value, dict) and value.get("bytes"):
         path.write_bytes(value["bytes"])
     elif isinstance(value, dict) and value.get("path"):
-        import shutil
         shutil.copyfile(value["path"], path)
-    elif isinstance(value, (str, Path)):
-        import shutil
-        shutil.copyfile(value, path)
     else:
-        raise ValueError(f"Unsupported audio value: {type(value)}")
+        shutil.copyfile(value, path)
     return str(path)
 
 
-def add_noise(source: str, destination: Path, seed: int, snr_db: float = 10.0) -> str:
-    import numpy as np
-    import soundfile as sf
-    source_digest = hashlib.sha256(Path(source).read_bytes()).hexdigest()
-    signature = hashlib.sha256(f"noise-v1\0{source_digest}\0{seed}\0{snr_db}".encode()).hexdigest()
-    signature_path = destination.with_suffix(destination.suffix + ".sha256")
-    if (
-        destination.is_file()
-        and destination.stat().st_size > 44
-        and signature_path.is_file()
-        and signature_path.read_text().strip() == signature
-    ):
-        return str(destination)
-    audio, sr = sf.read(source, always_2d=False)
-    audio = np.asarray(audio, dtype=np.float32)
-    rng = np.random.default_rng(seed)
-    noise = rng.normal(size=audio.shape).astype(np.float32)
-    signal_power = float(np.mean(audio ** 2)) + 1e-12
-    noise *= (signal_power / (10 ** (snr_db / 10)) / (float(np.mean(noise ** 2)) + 1e-12)) ** 0.5
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(destination, np.clip(audio + noise, -1, 1), sr)
-    signature_path.write_text(signature + "\n", encoding="utf-8")
-    return str(destination)
+def synthesize(text: str, path: Path, voice: str, speed: float = 1.0) -> str:
+    """Create a deterministic spoken prompt without depending on a benchmarked model."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(f"flite-v2.1\0{voice}\0{speed}\0{text}".encode()).hexdigest()
+    stamp = path.with_suffix(path.suffix + ".sha256")
+    if path.is_file() and stamp.is_file() and stamp.read_text().strip() == digest:
+        return str(path)
+    text_path = path.with_suffix(".txt")
+    text_path.write_text(text, encoding="utf-8")
+    command = [
+        "ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+        f"flite=textfile='{text_path}':voice={voice}",
+    ]
+    if speed != 1.0:
+        command += ["-filter:a", f"atempo={speed:.3f}"]
+    command += ["-ar", "16000", "-ac", "1", str(path)]
+    subprocess.run(command, check=True)
+    text_path.unlink(missing_ok=True)
+    stamp.write_text(digest + "\n")
+    return str(path)
 
 
-def content_hash(text: str) -> str:
-    return hashlib.sha256(normalize_text(text).encode()).hexdigest()
+def canonical_decontamination_text(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", str(text))
+    text = re.sub(r"\b(answer|respond) with only the option letter\b.*$", " ", text, flags=re.I | re.S)
+    text = re.sub(r"\banswer using a short phrase only\b.*$", " ", text, flags=re.I | re.S)
+    return normalize_text(text)
 
 
-def training_hashes(paths: list[str]) -> set[str]:
-    hashes = set()
-    try:
-        import pyarrow.parquet as pq
-        for raw_path in paths:
-            path = Path(raw_path)
-            if not path.exists():
-                continue
-            parquet = pq.ParquetFile(path)
-            # Reading the audio/image payload columns makes this scan orders of
-            # magnitude slower and consumes unnecessary memory. Decontamination
-            # only depends on the serialized conversation text.
-            for batch in parquet.iter_batches(batch_size=2048, columns=["conversations"]):
-                for row in batch.to_pylist():
-                    conversations = row.get("conversations") or row.get("conversation") or row.get("messages") or []
-                    if isinstance(conversations, str):
-                        try: conversations = json.loads(conversations)
-                        except Exception: conversations = []
-                    for turn in conversations:
-                        if isinstance(turn, dict) and turn.get("role") in {"user", "human"}:
-                            hashes.add(content_hash(str(turn.get("content") or turn.get("value") or "")))
-    except Exception as exc:
-        print(f"warning: training decontamination scan failed: {exc}", file=sys.stderr)
-    return hashes
+def content_hash(text: str) -> bytes:
+    # 128 digest bits are sufficient for local overlap detection and reduce a
+    # multi-million-row training hash cache to a manageable size.
+    return hashlib.sha256(normalize_text(text).encode()).digest()[:16]
 
 
-def main():
+def content_hashes(text: str) -> set[bytes]:
+    variants = {normalize_text(text), canonical_decontamination_text(text)}
+    return {hashlib.sha256(value.encode()).digest()[:16] for value in variants if value}
+
+
+def training_hashes(paths: list[str], cache_path: Path | None = None) -> tuple[set[bytes], dict[str, Any]]:
+    resolved = [Path(path).resolve() for path in paths if Path(path).exists()]
+    fingerprint = [(str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in resolved]
+    if cache_path and cache_path.is_file():
+        try:
+            cached = pickle.loads(cache_path.read_bytes())
+            if cached.get("fingerprint") == fingerprint:
+                print(f"loaded {len(cached['hashes'])} cached training-text hashes", flush=True)
+                return cached["hashes"], cached.get("scan", {})
+        except Exception:
+            pass
+
+    hashes: set[bytes] = set()
+    import pyarrow.parquet as pq
+    scanned_rows = 0
+    for path in resolved:
+        print(f"scanning training text for overlap: {path.name}", flush=True)
+        parquet = pq.ParquetFile(path)
+        if "conversations" not in parquet.schema.names:
+            raise ValueError(f"training parquet has no conversations column: {path}")
+        for batch in parquet.iter_batches(batch_size=2048, columns=["conversations"]):
+            scanned_rows += batch.num_rows
+            for row in batch.to_pylist():
+                conversations = row.get("conversations") or []
+                if isinstance(conversations, str):
+                    conversations = json.loads(conversations)
+                for turn in conversations:
+                    if isinstance(turn, dict) and turn.get("role") in {"user", "human"}:
+                        hashes.update(content_hashes(str(turn.get("content") or turn.get("value") or "")))
+        print(
+            f"decontamination scan: {scanned_rows:,} rows, {len(hashes):,} unique hashes",
+            flush=True,
+        )
+    scan = {"files": [str(path) for path in resolved], "rows": scanned_rows, "hashes": len(hashes)}
+    if not resolved or scanned_rows == 0:
+        raise RuntimeError("training decontamination found no readable training rows")
+    if cache_path:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        temporary.write_bytes(pickle.dumps({"fingerprint": fingerprint, "hashes": hashes, "scan": scan}, protocol=5))
+        os.replace(temporary, cache_path)
+    return hashes, scan
+
+
+def canonical_arc_answer(value: Any, choices: list[str]) -> str:
+    text = str(value).strip().upper()
+    if text in [chr(65 + index) for index in range(len(choices))]:
+        return text
+    if text.isdigit() and 1 <= int(text) <= len(choices):
+        return chr(64 + int(text))
+    raise ValueError(f"invalid ARC answer {value!r} for {len(choices)} choices")
+
+
+def canonical_zero_based_answer(value: Any, choices: list[str]) -> str:
+    text = str(value).strip().upper()
+    if text in [chr(65 + index) for index in range(len(choices))]:
+        return text
+    if text.isdigit() and 0 <= int(text) < len(choices):
+        return chr(65 + int(text))
+    raise ValueError(f"invalid zero-based answer {value!r} for {len(choices)} choices")
+
+
+def textvqa_rows(parquet_dir: Path, count: int, seed: int):
+    """Stream a deterministic subset from local, fully annotated validation shards."""
+    from datasets import load_dataset
+
+    files = sorted(str(path) for path in parquet_dir.glob("data/validation-*.parquet"))
+    if not files:
+        raise FileNotFoundError(
+            f"TextVQA validation parquet is missing under {parquet_dir}; "
+            "download lmms-lab-encoder/textvqa validation shards first"
+        )
+    dataset = load_dataset("parquet", data_files=files, split="train", streaming=True)
+    iterator = dataset.shuffle(seed=seed, buffer_size=max(512, count * 8))
+    accepted = []
+    for row in iterator:
+        answers = [str(answer).strip() for answer in (row.get("answers") or []) if str(answer).strip()]
+        question = str(row.get("question") or "").strip()
+        if question and answers and row.get("image") is not None:
+            accepted.append(row)
+        if len(accepted) == count:
+            break
+    if len(accepted) < count:
+        raise RuntimeError(f"TextVQA supplied only {len(accepted)}/{count} valid rows")
+    return accepted
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(PROJECT_ROOT / "benchmark/configs/standard.json"))
-    parser.add_argument("--output", default="/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/standard")
+    parser.add_argument("--output", default=None)
     parser.add_argument("--cache", default="/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/modelscope-cache")
-    parser.add_argument("--skip-audio", action="store_true")
     parser.add_argument("--skip-decontamination", action="store_true")
     parser.add_argument("--training-parquet", action="append", default=[])
+    parser.add_argument(
+        "--training-hash-cache",
+        default=str(PROJECT_ROOT / ".runtime/benchmark_cache/training-text-hashes-v2.1.pkl"),
+    )
     args = parser.parse_args()
-    config = json.loads(Path(args.config).read_text())
+
+    config_path = Path(args.config).resolve()
+    config_bytes = config_path.read_bytes()
+    config = json.loads(config_bytes)
     counts, seed = config["counts"], int(config["seed"])
-    output, media = Path(args.output).resolve(), Path(args.output).resolve() / "media"
+    default_output = f"/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/{config['name']}"
+    output = Path(args.output or default_output).resolve()
+    media = output / "media"
     output.mkdir(parents=True, exist_ok=True)
+
     from modelscope.msdatasets import MsDataset
 
-    def load(name, split, subset=None):
+    def load(name: str, split: str, subset: str | None = None):
+        # Prefer already materialized Arrow data. MsDataset otherwise performs
+        # a Hub metadata request even when every byte is present locally,
+        # which makes an offline/restricted benchmark unnecessarily brittle.
+        cache_root = Path(args.cache)
+        namespace, dataset_name = name.split("/", 1)
+        normalize = lambda value: re.sub(r"[^a-z0-9]", "", value.lower())
+        roots = [
+            path for path in cache_root.iterdir() if path.is_dir()
+            and normalize(namespace) in normalize(path.name)
+            and normalize(dataset_name) in normalize(path.name)
+        ] if cache_root.is_dir() else []
+        arrows = [
+            path for root in roots for path in root.rglob(f"*-{split}.arrow")
+            if not subset or normalize(subset) in normalize(str(path.parent))
+        ]
+        if len(arrows) == 1:
+            from datasets import Dataset
+            return Dataset.from_file(str(arrows[0]))
         return MsDataset.load(name, subset_name=subset, split=split, cache_dir=args.cache)
 
-    rows = []
-    arc = stable_rows(load(config["sources"]["arc_easy"], "test", "ARC-Easy"), counts["arc_easy"], seed)
-    for i, row in enumerate(arc):
+    def metadata(capability: str, output_modality: str, **extra):
+        return {
+            "capability": capability,
+            "output_modality": output_modality,
+            "require_audio": output_modality in {"audio", "text_audio"},
+            **extra,
+        }
+
+    generation_limits = {
+        "mcq": 32, "binary_mcq": 32, "vqa": 64, "wer": 256,
+        "tts": 256, "em": 64, "f1": 64, "constraint": 64,
+    }
+
+    def task_metadata(capability: str, output_modality: str, metric: str, **extra):
+        return metadata(
+            capability, output_modality,
+            max_new_tokens=generation_limits[metric], **extra,
+        )
+
+    rows: list[dict[str, Any]] = []
+
+    # Small text-only regression gate. Extra ARC rows supply spoken QA without
+    # spending benchmark budget on a large text suite.
+    arc_count = counts["arc_easy"] + max(counts["spoken_qa"] * 3, counts["spoken_qa"] + 20)
+    arc_all = stable_rows(load(config["sources"]["arc_easy"], "test", "ARC-Easy"), arc_count, seed)
+    for i, row in enumerate(arc_all[: counts["arc_easy"]]):
         choices = list(row["choices"]["text"])
-        rows.append({"sample_id": f"arc-easy-{i:04d}", "task": "text", "metric": "mcq", "prompt": mcq_prompt(row["question"], choices), "reference": row["answerKey"], "choices": choices, "source": "allenai/ai2_arc:ARC-Easy:test"})
+        rows.append({
+            "sample_id": f"text-arc-{i:04d}", "task": "text_regression", "metric": "mcq",
+            "prompt": mcq_prompt(row["question"], choices),
+            "reference": canonical_arc_answer(row["answerKey"], choices),
+            "choices": choices, "source": "allenai/ai2_arc:ARC-Easy:test",
+            "metadata": task_metadata("text_retention", "text", "mcq"),
+        })
     boolq = stable_rows(load(config["sources"]["boolq"], "validation"), counts["boolq"], seed + 1)
     for i, row in enumerate(boolq):
         choices = ["Yes", "No"]
-        rows.append({"sample_id": f"boolq-{i:04d}", "task": "text", "metric": "mcq", "prompt": mcq_prompt(row["question"], choices, row["passage"]), "reference": "A" if row["answer"] else "B", "choices": choices, "source": "google/boolq:validation"})
+        rows.append({
+            "sample_id": f"text-boolq-{i:04d}", "task": "text_regression", "metric": "mcq",
+            "prompt": mcq_prompt(row["question"], choices, row["passage"]),
+            "reference": "A" if row["answer"] else "B", "choices": choices,
+            "source": "google/boolq:validation", "metadata": task_metadata("text_retention", "text", "mcq"),
+        })
     piqa = stable_rows(load(config["sources"]["piqa"], "validation"), counts["piqa"], seed + 2)
     for i, row in enumerate(piqa):
         choices = list(row["choices"])
-        rows.append({"sample_id": f"piqa-{i:04d}", "task": "text", "metric": "mcq", "prompt": mcq_prompt(row["question"], choices), "reference": row.get("answer", chr(65 + int(row["answer_index"]))), "choices": choices, "source": "extraordinarylab/piqa:validation"})
+        rows.append({
+            "sample_id": f"text-piqa-{i:04d}", "task": "text_regression", "metric": "mcq",
+            "prompt": mcq_prompt(row["question"], choices),
+            "reference": canonical_zero_based_answer(
+                row.get("answer_index") if row.get("answer_index") is not None else row.get("answer"), choices,
+            ), "choices": choices,
+            "source": "extraordinarylab/piqa:validation", "metadata": task_metadata("text_retention", "text", "mcq"),
+        })
 
-    spoken_candidates = [row for row in rows if row["metric"] == "mcq" and len(row["prompt"].split()) <= 70]
-    spoken_pool = []
-    for base in spoken_candidates:
-        i = len(spoken_pool)
-        audio = synthesize(base["prompt"], media / "spoken_mcq" / f"{i:04d}.wav", "slt" if i % 2 == 0 else "rms")
-        if duration_seconds(audio) > 30.0:
+    spoken = []
+    for base in arc_all[counts["arc_easy"]:]:
+        choices = list(base["choices"]["text"])
+        prompt = mcq_prompt(base["question"], choices)
+        if len(prompt.split()) > 70:
             continue
-        spoken_pool.append((base, audio))
-        if len(spoken_pool) == counts["spoken_mcq"]:
+        index = len(spoken)
+        voice, speed = (("slt", 0.92), ("slt", 1.08), ("rms", 0.92), ("rms", 1.08))[index % 4]
+        audio = synthesize(prompt, media / "spoken_qa" / f"{index:04d}.wav", voice, speed)
+        if duration_seconds(audio) <= 30:
+            spoken.append((prompt, choices, canonical_arc_answer(base["answerKey"], choices), audio))
+        if len(spoken) == counts["spoken_qa"]:
             break
-    if len(spoken_pool) < counts["spoken_mcq"]:
-        raise RuntimeError(f"Only {len(spoken_pool)} spoken MCQs fit the 30-second audio budget")
-    for i, (base, audio) in enumerate(spoken_pool):
-        rows.append({**base, "sample_id": f"spoken-{i:04d}", "task": "audio", "prompt": "", "audio": audio, "metadata": {"transcript_prompt": base["prompt"], "require_audio": True}, "source": base["source"] + "+flite"})
+    if len(spoken) < counts["spoken_qa"]:
+        raise RuntimeError(f"only {len(spoken)} spoken questions fit the duration limit")
+    for i, (prompt, choices, answer, audio) in enumerate(spoken):
+        common = {
+            "metric": "mcq", "prompt": "", "reference": answer, "choices": choices, "audio": audio,
+            "source": "allenai/ai2_arc:ARC-Easy:test+flite",
+        }
+        rows.append({
+            **common, "sample_id": f"spoken-a2t-{i:04d}", "task": "spoken_qa_a2t",
+            "metadata": task_metadata("speech_understanding", "text", "mcq", transcript_prompt=prompt),
+        })
+        rows.append({
+            **common, "sample_id": f"spoken-a2a-{i:04d}", "task": "spoken_qa_a2a",
+            "metadata": task_metadata(
+                "speech_understanding", "text_audio", "mcq", transcript_prompt=prompt,
+                paired_id=f"spoken-a2t-{i:04d}",
+            ),
+        })
 
-    if not args.skip_audio:
-        for subset, key, offset in (("clean", "librispeech_clean", 10), ("other", "librispeech_other", 11)):
-            dataset = load(config["sources"]["librispeech"], "test", subset)
-            indices = list(range(len(dataset)))
-            random.Random(seed + offset).shuffle(indices)
-            accepted = 0
-            for index in indices:
-                row = dataset[index]
-                audio_value = row.get("audio") or row.get("file")
-                path = save_audio(audio_value, media / "librispeech" / subset / f"{accepted:04d}.wav")
-                if duration_seconds(path) > 30.0:
-                    continue
-                reference = row.get("text") or row.get("transcription") or row.get("sentence")
-                rows.append({"sample_id": f"librispeech-{subset}-{accepted:04d}", "task": "audio", "metric": "wer", "prompt": "Transcribe the speech exactly in English.", "reference": reference, "audio": path, "metadata": {"require_audio": False}, "source": f"openslr/librispeech_asr:{subset}:test"})
-                accepted += 1
-                if accepted == counts[key]:
-                    break
-            if accepted < counts[key]:
-                raise RuntimeError(f"LibriSpeech {subset} only supplied {accepted} samples within 30 seconds")
-
-    visual_specs = [
-        (config["sources"]["mmbench_en"], "dev", counts["mmbench_en"], "mmbench", seed + 20),
-        (config["sources"]["pope"], "test", counts["pope"], "pope", seed + 21),
-        (config["sources"]["textvqa"], "train", counts["textvqa"], "textvqa", seed + 22),
-    ]
-    for dataset_id, split, count, kind, local_seed in visual_specs:
-        if count <= 0:
-            continue
-        dataset = load(dataset_id, split)
-        if kind == "pope":
-            flattened = []
-            # Each POPE row owns one image and six questions in each sampling strategy.
-            for source_row in dataset:
-                for item in source_row.get("adversarial", []):
-                    flattened.append({"image": source_row["image"], **item})
-            candidates = stable_rows(flattened, len(flattened), local_seed)
-        elif kind == "mmbench":
-            eligible = []
-            for source_row in dataset:
-                candidate_choices = [str(source_row.get(letter)) for letter in "ABCD" if str(source_row.get(letter, "nan")) != "nan"]
-                candidate_prompt = mcq_prompt(str(source_row["question"]), candidate_choices, str(source_row.get("hint", "")))
-                if len(candidate_prompt.split()) <= 70:
-                    eligible.append(source_row)
-            candidates = stable_rows(eligible, len(eligible), local_seed)
-        else:
-            candidates = stable_rows(dataset, len(dataset), local_seed)
+    # Natural speech for ASR and disjoint target sentences/natural labels for TTS.
+    tts_remaining = counts["tts"]
+    for subset, count, offset in (
+        ("clean", counts["librispeech_clean"], 10),
+        ("other", counts["librispeech_other"], 11),
+    ):
+        dataset = load(config["sources"]["librispeech"], "test", subset)
+        extra = tts_remaining if subset == "clean" else 0
+        candidates = stable_rows(dataset, count + extra + 100, seed + offset)
         accepted = 0
-        for row in candidates:
-            if kind == "mmbench":
-                choices = [str(row.get(letter)) for letter in "ABCD" if str(row.get(letter, "nan")) != "nan"]
-                prompt = mcq_prompt(str(row["question"]), choices, str(row.get("hint", "")))
-                reference, metric = row["answer"], "mcq"
-            elif kind == "pope":
-                choices = ["Yes", "No"]
-                prompt = mcq_prompt(str(row.get("question") or row.get("text")), choices)
-                raw = str(row.get("answer") or row.get("label")).lower()
-                reference, metric = ("A" if raw in {"yes", "1", "true"} else "B"), "mcq"
-            else:
-                choices = []
-                prompt = str(row.get("question")) + "\nAnswer using a short phrase only."
-                reference, metric = row.get("answers") or row.get("answer"), "vqa"
-            question_audio = synthesize(prompt, media / kind / f"{accepted:04d}.wav", "slt" if accepted % 2 == 0 else "rms")
-            if duration_seconds(question_audio) > 30.0:
+        tts_candidates = []
+        for source_row in candidates:
+            audio_value = source_row.get("audio") or source_row.get("file")
+            path = save_audio(audio_value, media / "librispeech" / subset / f"{accepted:04d}.flac")
+            if duration_seconds(path) > 30:
+                Path(path).unlink(missing_ok=True)
                 continue
-            image_value = row.get("image") or row.get("image_path")
-            image = save_image(image_value, media / kind / f"{accepted:04d}.jpg")
-            rows.append({"sample_id": f"{kind}-{accepted:04d}", "task": "audio_vision" if kind == "pope" else "vision", "metric": metric, "prompt": "", "reference": reference, "choices": choices, "image": image, "audio": question_audio, "metadata": {"transcript_prompt": prompt, "require_audio": True}, "source": f"{dataset_id}:{split}"})
+            text = source_row.get("text") or source_row.get("transcription") or source_row.get("sentence")
+            if accepted < count:
+                rows.append({
+                    "sample_id": f"asr-{subset}-{accepted:04d}", "task": f"asr_{subset}",
+                    "metric": "wer", "prompt": "Transcribe the speech exactly in English.",
+                    "reference": text, "audio": path,
+                    "source": f"openslr/librispeech_asr:{subset}:test",
+                    "metadata": task_metadata(
+                        "asr", "text", "wer", input_duration_seconds=duration_seconds(path),
+                        decontamination_text=text,
+                    ),
+                })
+            elif subset == "clean" and len(tts_candidates) < tts_remaining:
+                tts_candidates.append((text, path))
             accepted += 1
-            if accepted == count:
+            if accepted >= count and (subset != "clean" or len(tts_candidates) >= tts_remaining):
                 break
         if accepted < count:
-            raise RuntimeError(f"{kind} only supplied {accepted} of {count} samples within 30 seconds")
+            raise RuntimeError(f"LibriSpeech {subset} supplied only {accepted}/{count} samples")
+        if subset == "clean":
+            for i, (text, label_audio) in enumerate(tts_candidates):
+                spoken_text = naturalize_tts_text(text)
+                rows.append({
+                    "sample_id": f"tts-{i:04d}", "task": "tts", "metric": "tts",
+                    "prompt": f"Read the following text exactly and do not add commentary:\n{spoken_text}",
+                    "reference": spoken_text, "source": "openslr/librispeech_asr:clean:test",
+                    "metadata": task_metadata(
+                        "speech_generation", "audio", "tts", target_text=spoken_text,
+                        label_audio=label_audio, decontamination_text=text,
+                    ),
+                })
+            tts_remaining -= len(tts_candidates)
+    if tts_remaining:
+        raise RuntimeError(f"missing {tts_remaining} TTS target sentences")
 
-    # Fixed programmatic instruction following contributes to the text category.
-    for i in range(counts["instruction"]):
-        color = ["red", "blue", "green", "yellow"][i % 4]
-        rows.append({"sample_id": f"instruction-{i:04d}", "task": "text", "metric": "constraint", "prompt": f"Reply in at most five words and include the word {color}.", "reference": {"max_words": 5, "must_include": [color]}, "source": "generated:instruction-v1"})
+    visual_for_av: list[dict[str, Any]] = []
 
-    # Gaussian-noise preservation set, paired to the first spoken MCQs.
-    for i, (base, _) in enumerate(spoken_pool[: counts["robustness"]]):
-        clean = media / "spoken_mcq" / f"{i:04d}.wav"
-        noisy = add_noise(str(clean), media / "robustness" / f"{i:04d}-snr10.wav", seed + i)
-        rows.append({**base, "sample_id": f"robust-audio-{i:04d}", "task": "robustness", "prompt": "", "audio": noisy, "perturbation": "white-noise-10db", "metadata": {"base_id": f"spoken-{i:04d}", "transcript_prompt": base["prompt"], "require_audio": True}, "source": base["source"] + "+noise10db"})
+    # MMBench-EN: general image understanding.
+    dataset_id, split = config["sources"]["mmbench_en"], "dev"
+    dataset = load(dataset_id, split)
+    accepted = 0
+    for row in stable_iter(dataset, seed + 20):
+        choices = [str(row.get(letter)) for letter in "ABCD" if str(row.get(letter, "nan")) != "nan"]
+        prompt = mcq_prompt(str(row["question"]), choices, str(row.get("hint", "")))
+        if len(prompt.split()) > 90:
+            continue
+        image = save_image(row.get("image") or row.get("image_path"), media / "mmbench" / f"{accepted:04d}.jpg")
+        visual_row = {
+            "sample_id": f"vision-mmbench-{accepted:04d}", "task": "vision_mmbench",
+            "metric": "mcq", "prompt": prompt, "reference": str(row["answer"]).strip().upper(),
+            "choices": choices, "image": image, "source": f"{dataset_id}:{split}",
+            "metadata": task_metadata(
+                "vision", "text", "mcq", source_id=str(row.get("index") or row.get("id") or accepted),
+            ),
+        }
+        rows.append(visual_row)
+        visual_for_av.append(visual_row)
+        accepted += 1
+        if accepted == counts["mmbench_en"]:
+            break
+    if accepted < counts["mmbench_en"]:
+        raise RuntimeError(f"mmbench supplied only {accepted}/{counts['mmbench_en']} samples")
+    del dataset
 
-    defaults = {"choices": [], "image": None, "audio": None, "perturbation": "clean", "metadata": {}}
-    training_paths = args.training_parquet or [str(PROJECT_ROOT / "dataset" / name) for name in ("sft_t2a.parquet", "sft_a2a.parquet", "sft_i2t.parquet")]
-    seen = set() if args.skip_decontamination else training_hashes(training_paths)
+    # POPE: balance adversarial/popular/random and Yes/No rather than scoring
+    # only the adversarial subset.
+    dataset_id, split = config["sources"]["pope"], "test"
+    dataset = load(dataset_id, split)
+    strategies = ("adversarial", "popular", "random")
+    desired = Counter()
+    for index in range(counts["pope"]):
+        # Alternating labels while cycling strategies keeps both dimensions
+        # balanced even when the requested count is not divisible by six.
+        desired[(strategies[index % len(strategies)], "yes" if index % 2 == 0 else "no")] += 1
+    accepted = 0
+    for source_index, source_row in enumerate(stable_iter(dataset, seed + 21)):
+        for strategy in strategies:
+            items = list(source_row.get(strategy, []))
+            random.Random(seed + source_index * 17 + len(strategy)).shuffle(items)
+            for item in items:
+                raw = str(item.get("answer") or item.get("label")).lower()
+                label = "yes" if raw in {"yes", "1", "true"} else "no"
+                key = (strategy, label)
+                if desired[key] <= 0:
+                    continue
+                image = save_image(source_row["image"], media / "pope" / f"{accepted:04d}.jpg")
+                choices = ["Yes", "No"]
+                visual_row = {
+                    "sample_id": f"vision-pope-{accepted:04d}", "task": "vision_pope",
+                    "metric": "binary_mcq", "prompt": mcq_prompt(str(item["question"]), choices),
+                    "reference": "A" if label == "yes" else "B", "choices": choices,
+                    "image": image, "source": f"{dataset_id}:{split}:{strategy}",
+                    "metadata": task_metadata(
+                        "vision", "text", "binary_mcq", pope_strategy=strategy,
+                        source_id=f"{source_index}:{strategy}:{item['question']}",
+                    ),
+                }
+                rows.append(visual_row)
+                visual_for_av.append(visual_row)
+                desired[key] -= 1
+                accepted += 1
+                break
+        if accepted == counts["pope"]:
+            break
+    if accepted < counts["pope"]:
+        raise RuntimeError(f"POPE supplied only {accepted}/{counts['pope']} balanced samples")
+    del dataset
+
+    # TextVQA: use fully annotated validation parquet. The former lite source
+    # contained images only and is intentionally rejected by the validator.
+    textvqa_dir = Path(config["sources"]["textvqa_local_dir"]).expanduser().resolve()
+    textvqa_candidate_count = counts["textvqa"] + (
+        max(16, counts["textvqa"] // 4) if not args.skip_decontamination else 0
+    )
+    for accepted, row in enumerate(textvqa_rows(textvqa_dir, textvqa_candidate_count, seed + 22)):
+        answers = [str(answer).strip() for answer in row["answers"] if str(answer).strip()]
+        prompt = str(row["question"]).strip() + "\nAnswer using a short phrase only."
+        image = save_image(row["image"], media / "textvqa" / f"{accepted:04d}.jpg")
+        rows.append({
+            "sample_id": f"vision-textvqa-{accepted:04d}", "task": "vision_textvqa",
+            "metric": "vqa", "prompt": prompt, "reference": answers, "choices": [],
+            "image": image, "source": "lmms-lab-encoder/textvqa:validation",
+            "metadata": task_metadata(
+                "vision", "text", "vqa",
+                source_id=str(row.get("question_id") or f"textvqa-{accepted}"),
+            ),
+        })
+
+    accepted = 0
+    for base in visual_for_av:
+        question_audio = synthesize(
+            base["prompt"], media / "audio_vision" / f"{accepted:04d}.wav",
+            ("slt", "rms")[accepted % 2], (0.95, 1.05)[accepted % 2],
+        )
+        input_duration = duration_seconds(question_audio)
+        if input_duration > 30:
+            Path(question_audio).unlink(missing_ok=True)
+            Path(question_audio + ".sha256").unlink(missing_ok=True)
+            continue
+        rows.append({
+            "sample_id": f"audio-vision-{accepted:04d}", "task": "audio_vision", "metric": base["metric"],
+            "prompt": "", "reference": base["reference"], "choices": base["choices"],
+            "image": base["image"], "audio": question_audio, "source": base["source"] + "+flite",
+            "metadata": task_metadata(
+                "cross_modal", "text", base["metric"], paired_id=base["sample_id"],
+                transcript_prompt=base["prompt"], input_duration_seconds=input_duration,
+            ),
+        })
+        accepted += 1
+        if accepted == counts["audio_vision"]:
+            break
+    if accepted < counts["audio_vision"]:
+        raise RuntimeError("not enough visual MCQs for the paired audio-vision set")
+
+    nlvr_split = config.get("splits", {}).get("nlvr2", "balanced_dev")
+    nlvr = load(config["sources"]["nlvr2"], nlvr_split)
+    accepted = 0
+    for row in stable_iter(nlvr, seed + 30):
+        first = row.get("image0") or row.get("image_0") or row.get("left_image")
+        second = row.get("image1") or row.get("image_1") or row.get("right_image")
+        if first is None or second is None:
+            continue
+        images = [
+            save_image(first, media / "nlvr2" / f"{accepted:04d}-0.jpg"),
+            save_image(second, media / "nlvr2" / f"{accepted:04d}-1.jpg"),
+        ]
+        choices = ["True", "False"]
+        raw = str(row.get("label") or row.get("answer")).lower()
+        reference = "A" if raw in {"true", "1", "yes"} else "B"
+        statement = str(row.get("sentence") or row.get("question") or row.get("text"))
+        rows.append({
+            "sample_id": f"multi-image-{accepted:04d}", "task": "multi_image", "metric": "mcq",
+            "prompt": mcq_prompt(statement, choices), "reference": reference, "choices": choices,
+            "images": images, "source": f"{config['sources']['nlvr2']}:{nlvr_split}",
+            "metadata": task_metadata(
+                "cross_modal", "text", "mcq",
+                source_id=str(row.get("identifier") or row.get("id") or accepted),
+            ),
+        })
+        accepted += 1
+        if accepted == counts["nlvr2"]:
+            break
+    if accepted < counts["nlvr2"]:
+        raise RuntimeError(f"NLVR2 supplied only {accepted}/{counts['nlvr2']} samples")
+
+    defaults = {
+        "choices": [], "image": None, "images": [], "audio": None,
+        "perturbation": "clean", "metadata": {},
+    }
+    training_paths = args.training_parquet or [
+        str(PROJECT_ROOT / "dataset" / name)
+        for name in ("sft_t2a.parquet", "sft_a2a.parquet", "sft_i2t.parquet")
+    ]
+    if args.skip_decontamination:
+        seen, decontamination_scan = set(), {"skipped": True}
+    else:
+        seen, decontamination_scan = training_hashes(
+            training_paths, Path(args.training_hash_cache).resolve(),
+        )
+    from benchmark.validate_manifest import expected_task_counts, validate_manifest
+
+    desired_counts = expected_task_counts(config)
+    selected_counts: Counter[str] = Counter()
     clean_rows, rejected = [], []
     for row in rows:
         complete = {**defaults, **row}
-        complete["metadata"] = dict(complete.get("metadata") or {})
-        complete["metadata"].setdefault("require_audio", complete["metric"] != "wer")
-        decontamination_text = complete["metadata"].get("transcript_prompt", complete["prompt"])
-        if seen and content_hash(decontamination_text) in seen:
+        decontamination_text = complete["metadata"].get(
+            "decontamination_text",
+            complete["metadata"].get("transcript_prompt", complete["prompt"]),
+        )
+        if not str(decontamination_text or "").strip():
+            raise ValueError(f"sample {complete['sample_id']} has no decontamination text")
+        if seen and content_hashes(str(decontamination_text)) & seen:
             rejected.append(complete["sample_id"])
-        else:
+        elif selected_counts[complete["task"]] < desired_counts[complete["task"]]:
             clean_rows.append(complete)
+            selected_counts[complete["task"]] += 1
+
     manifest = output / "manifest.jsonl"
-    manifest.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in clean_rows), encoding="utf-8")
-    source_counts = Counter(row["source"] for row in clean_rows)
-    metadata = {
-        "name": config["name"], "seed": seed, "samples": len(clean_rows),
-        "source_counts": source_counts, "rejected_training_overlap": rejected,
-        "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
-        "tts": {"engine": "FFmpeg flite", "voices": ["slt", "rms"], "sample_rate": 16000},
+    payload = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in clean_rows)
+    manifest.write_text(payload, encoding="utf-8")
+    summary = {
+        "name": config["name"], "profile": config.get("profile", "standard"), "seed": seed,
+        "builder_version": BUILDER_VERSION,
+        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "samples": len(clean_rows), "task_counts": Counter(row["task"] for row in clean_rows),
+        "decontaminated_against_training": not args.skip_decontamination,
+        "decontamination_scan": decontamination_scan,
+        "rejected_training_overlap": rejected,
+        "manifest_sha256": hashlib.sha256(payload.encode()).hexdigest(),
+        "spoken_prompt_tts": {
+            "engine": "FFmpeg flite", "voices": ["slt", "rms"],
+            "speed_factors": [0.92, 0.95, 1.05, 1.08],
+        },
     }
-    (output / "manifest.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n")
-    print(json.dumps(metadata, indent=2, ensure_ascii=False))
+    (output / "manifest.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+    validate_manifest(
+        manifest,
+        metadata_path=output / "manifest.json",
+        expected_builder=BUILDER_VERSION,
+        config_path=config_path,
+    )
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

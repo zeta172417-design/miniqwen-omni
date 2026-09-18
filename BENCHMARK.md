@@ -1,178 +1,151 @@
-# MiniQwen-Omni objective benchmark
+# Omni Benchmark V0
 
-The first benchmark compares MiniQwen V0, MiniQwen V0.1, the larger
-Qwen2.5-Omni-3B upper bound, and Mini-Omni2. V0.1 is the frozen-encoder release;
-experimental architecture candidates are not part of the first full run. The
-headline score uses objective metrics only; inference
-failures and empty outputs remain in the denominator.
+This suite focuses on Omni capabilities rather than re-evaluating the pretrained
+Qwen text backbone. It compares MiniQwen V0, MiniQwen V0.1, MiniMind-3O-MoE,
+Mini-Omni2, and Qwen2.5-Omni-3B with objective English metrics.
 
-## Workspace
+V0 uses scorer 2.3.0 and data-builder 2.3.0. The scorer separates semantic
+correctness from output-format compliance. MCQ
+answers may be an explicit option letter, one uniquely stated option text, or
+one unambiguous standalone capital option letter. A verbose correct answer is
+therefore not scored as wrong merely for ignoring the letter-only instruction;
+strict format compliance remains visible as a diagnostic. TextVQA retains the
+annotation-consensus rule while allowing a normalized reference answer as a
+complete token span in a brief explanation.
 
-The default layout is:
+## Capability set
 
-```text
-/mnt/workspace/zhaozetao/multimodel/Omni/
-├── miniqwen-omni -> ../miniqwen-omni
-├── mini-omni2/{source,checkpoint}
-├── Qwen2.5-Omni-3B/
-├── benchmark-data/
-├── benchmark-results/
-└── models-manifest.json
-```
+The standard profile contains 752 main samples plus 16 reference voice-cloning
+samples. The quick profile contains 110 main samples plus 8 cloning samples.
 
-Qwen2.5-Omni-3B is downloaded from the official ModelScope repository.
-Mini-Omni2 has no author-maintained ModelScope repository, so its code and
-checkpoint are pinned to the official GitHub and Hugging Face revisions.
+The frozen first official result is summarized in
+[`benchmark/reports/OMNI_BENCHMARK_V0.md`](benchmark/reports/OMNI_BENCHMARK_V0.md).
+MiniQwen V0.1 is the architecture baseline for subsequent data and training
+pipeline improvements; MiniQwen V0 remains the historical parallel-delay
+comparison model.
 
-Recreate or verify model downloads with:
+| Task | Standard | Input → output | Primary diagnostics |
+|---|---:|---|---|
+| LibriSpeech test-clean/test-other ASR | 160 | audio → text | WER |
+| Spoken QA A2T | 80 | audio → text | answer accuracy |
+| Spoken QA A2A | 80 | audio → text + audio | spoken-answer accuracy, text/speech consistency |
+| TTS | 64 | text → audio | ASR-WER, UTMOS, validity |
+| MMBench-EN | 120 | image + text → text | accuracy |
+| POPE | 60 | image + text → text | F1 and accuracy |
+| TextVQA | 60 | image + text → text | VQA score |
+| Image + spoken question | 64 | image + audio → text | paired accuracy |
+| NLVR2 | 32 | two images + text → text | accuracy |
+| Text regression guard | 32 | text → text | accuracy, excluded from Omni score |
+| Voice clone | 16 | reference audio + text → audio | speaker cosine, 1-WER, UTMOS |
+
+Every manifest row declares `output_modality` and `require_audio`. ASR, image
+understanding, audio-vision understanding, multi-image, and text-regression rows
+never start Talker. Only A2A, TTS, and voice cloning generate speech.
+
+Unsupported public APIs remain `N/A` in task diagnostics, but count as zero in
+the headline Fixed Omni score. Mini-Omni2's public API, for example, does not
+expose text-question image inference or multi-image input. The secondary Common
+Task score averages the exact non-text tasks completed by every model in the
+same report, so unlike a capability-name intersection it compares like with
+like.
+
+## Prepare data
+
+The runner automatically prepares a missing manifest. To prepare explicitly:
 
 ```bash
 cd /mnt/workspace/zhaozetao/multimodel/miniqwen-omni
 source envs/Omni-ppu/bin/activate
-bash scripts/download_benchmark_models.sh
+
+python benchmark/prepare_data.py \
+  --config benchmark/configs/quick.json \
+  --output /mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/omni-core-v2.3-quick \
+  --skip-decontamination
+
+python benchmark/prepare_data.py \
+  --config benchmark/configs/standard.json \
+  --output /mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/omni-core-v2.3-standard
 ```
 
-## Data
-
-The standard English suite contains:
-
-| Category | Data | Samples | Metric |
-|---|---|---:|---|
-| Text | ARC-Easy, BoolQ, PIQA | 500 | accuracy |
-| Spoken MCQ | fixed Flite rendering of held-out MCQs | 300 | accuracy |
-| ASR | LibriSpeech test-clean/test-other | 500 | 1-WER |
-| Vision | MMBench-EN | 350 | accuracy |
-| Image + spoken question | POPE | 150 | accuracy |
-| Instruction following | generated fixed constraints | 200 | constraint pass rate |
-| Robustness | paired 10 dB noisy speech | 200 | preservation rate |
-
-The same offline English voices (`slt`, `rms`) are used for every model.
-Mini-Omni2's published vision interface requires a spoken question, so all
-models receive identical image + spoken-question inputs for vision rows.
-All input audio is capped at 30 seconds. Generated Flite files are reused only
-when their stored content signature matches the current prompt and voice.
-
-Prepare the data through ModelScope:
+The first standard preparation scans the three training parquet files for raw
+and modality-tag-stripped normalized overlap. Its compact hash set is cached
+under `.runtime/benchmark_cache`; later standard preparation reuses it. Quick
+is intended for frequent architecture iteration and explicitly skips the costly
+scan; this is recorded in its metadata. An official annotated TextVQA
+validation shard is retained in the shared data directory; other source media
+use the ModelScope cache. To reproduce that download through the domestic
+Hugging Face mirror:
 
 ```bash
-source envs/Omni-ppu/bin/activate
-python -u benchmark/prepare_data.py
+HF_ENDPOINT=https://hf-mirror.com hf download lmms-lab-encoder/textvqa \
+  --repo-type dataset \
+  --include 'data/validation-00002-of-00003.parquet' \
+  --local-dir /mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/hf-textvqa-validation
 ```
-
-For a quick data-format check, append `--skip-audio --skip-decontamination`.
-The final command scans the MiniQwen training parquet files and removes exact
-normalized prompt overlaps. The manifest and its SHA256 are recorded under
-`Omni/benchmark-data/standard`.
 
 ## Run
 
-First verify the scoring/report path without loading a model:
+Quick architecture comparison:
 
 ```bash
 source envs/Omni-ppu/bin/activate
-python -m benchmark.run_benchmark \
-  --config benchmark/configs/smoke.json --model mock
-python -m benchmark.build_report \
-  --run-dir /mnt/workspace/zhaozetao/multimodel/Omni/benchmark-results/smoke-v1
+bash scripts/run_omni_benchmark.sh quick
 ```
 
-Run one real model directly when debugging an adapter:
+Formal comparison:
 
 ```bash
 source envs/Omni-ppu/bin/activate
-RUN_ID=standard-$(date -u +%Y%m%dT%H%M%SZ)
-python -u benchmark/run_benchmark.py --config benchmark/configs/models.json \
-  --model miniqwen-v0.1 --run-id "$RUN_ID" --resume
+bash scripts/run_omni_benchmark.sh standard
 ```
 
-Run the complete four-model suite in parallel on four PPUs:
+Select models or devices without editing code:
 
 ```bash
-source envs/Omni-ppu/bin/activate
-bash scripts/run_omni_benchmark.sh full
+OMNI_BENCH_MODELS=miniqwen-v0.1,minimind-3o-moe \
+OMNI_BENCH_DEVICES=0,1,2,3 \
+bash scripts/run_omni_benchmark.sh quick
 ```
 
-By default, MiniQwen V0, MiniQwen V0.1, Qwen2.5-Omni-3B and Mini-Omni2 are
-assigned to PPU 0/1/2/3 respectively. Inference finishes before the shared-ASR
-phase begins; ASR scoring is then also distributed one process per PPU. Runs
-are resumable and share one `RUN_ID` across all models. Progress is printed on
-the first sample, every 10 samples, on failures, and on the final sample.
+Evaluation is data parallel: each process owns a complete model and a disjoint
+manifest shard. No model weights are split across PPUs. MiniQwen V0.1 uses
+native batch 4 by default; adapters without safe batching use batch 1. Runs are
+resumable with the same `OMNI_BENCH_RUN_ID`. Resume is rejected if the manifest,
+checkpoint, adapter, seed, shard layout, batch size, or decoding mode changed.
+Text generation is greedy so repeated runs are deterministic at the decoding
+level. Qwen2.5-Omni audio generation uses its model-card-required system prompt
+and a label-independent Talker safety cap; natural-label duration is never fed
+to model inference.
 
-Select the available cards with `OMNI_BENCH_DEVICES=0,1,2,3`. For a strictly
-sequential efficiency run, use `OMNI_BENCH_PARALLEL=0`; this avoids shared
-CPU/I/O contention and therefore gives the cleanest latency comparison. The
-default parallel mode still isolates each model's PPU memory because each model
-has its own card, and substantially reduces total wall-clock time.
+The same SenseVoice checkpoint scores generated speech on PPU. Set
+`OMNI_BENCH_ASR_DEVICE=cpu` only for fallback. UTMOS predicts naturalness MOS
+on a roughly 1–5 scale and is enabled by default from the shared SpeechMOS
+checkout. ASR-WER measures content, speaker cosine measures voice identity,
+and UTMOS measures perceptual quality; all three are reported because none is
+a substitute for the others. To override its location:
 
-Before a full run, validate the runner and report builder without loading a
-model, then optionally run one real Mini-Omni2 sample:
+```bash
+OMNI_BENCH_UTMOS_REPO=/path/to/SpeechMOS \
+bash scripts/run_omni_benchmark.sh standard
+```
+
+Set `OMNI_BENCH_UTMOS_REPO=0` only when MOS scoring is intentionally disabled.
+
+## Outputs
+
+Results are written under:
+
+```text
+/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-results/<run-id>/
+```
+
+Each run contains per-sample JSONL, task/capability metrics, generated WAV files,
+`summary.csv`, `failures.csv`, and `REPORT.md`. The report includes directly
+playable TTS natural labels, generated TTS, and voice-cloning reference/label/
+generated examples.
+
+Run the code-only smoke test without loading a real model:
 
 ```bash
 bash scripts/run_omni_benchmark.sh smoke
-bash scripts/run_omni_benchmark.sh mini-omni2-smoke
-```
-
-On the PPU host, Mini-Omni2 uses the existing PPU Torch plus isolated
-compatibility packages from `.runtime/mini_omni2_ppu_deps`; it never replaces
-the training environment's Torch. An official Python 3.10/CUDA virtualenv can
-still be selected with `MINIOMNI_BENCH_PYTHON=/path/to/python`.
-
-Mini-Omni2's official environment pins Python 3.10 and PyTorch 2.3.1. The
-included compatibility setup keeps the host's PPU Torch 2.11 build and places
-only Python-level dependencies in `.runtime/mini_omni2_ppu_deps`. Run
-`bash scripts/setup_benchmark_envs.sh` once before evaluation. The adapter has
-been smoke-tested on PPU-ZW810E; an official CUDA environment remains an
-optional fallback and should be identified as cross-device in efficiency
-comparisons.
-
-Qwen inference needs `qwen-omni-utils`; install `benchmark/requirements-qwen.txt`
-without replacing the PPU build of Torch. Mini-Omni2 dependencies are listed in
-`benchmark/requirements-mini-omni2.txt` for its separate environment.
-
-## Shared speech scoring and report
-
-Run the same ASR over every model's generated speech. On the PPU host the
-default pipeline uses PPU inference (`cuda:0` inside each process's visible
-device):
-
-```bash
-python benchmark/evaluate_audio.py \
-  --input /path/to/model/per_sample.jsonl \
-  --asr model/SenseVoiceSmall \
-  --device cuda:0
-python benchmark/build_report.py --run-dir /path/to/run
-```
-
-The first PPU ASR batch includes graph/kernel warm-up. On this host a warmed
-20-sample comparison measured about 12.43 samples/s on PPU versus 4.37
-samples/s on CPU. Use `OMNI_BENCH_ASR_DEVICE=cpu` for a CPU fallback.
-
-The run directory contains per-sample JSONL, aggregate JSON/CSV, failures,
-generated WAV files, and `REPORT.md` with directly playable examples. UTMOS is
-optional and can be enabled with a local SpeechMOS checkout via `--utmos-repo`;
-without it, speech quality is explicitly limited to validity, silence and
-clipping diagnostics.
-
-The weighted quality score is text 10%, audio 20%, vision 20%, image+audio 15%,
-text-speech consistency 15%, speech quality 15%, and robustness 5%. Missing
-capabilities are not silently dropped after a full run: they appear as failed
-samples. Qwen2.5-Omni-3B is an upper bound rather than a parameter-matched model.
-
-## MiniQwen voice cloning
-
-The full runner also evaluates MiniQwen V0 and V0.1 on a fixed 48-sample
-LibriSpeech test-clean subset (12 speakers and four target utterances per
-speaker). One different utterance supplies the CAMPPlus/Mimi reference
-condition. The natural target recording is never passed to the model.
-
-Speaker similarity is scored by the independent English VoxCeleb ERes2Net
-model under `model/eres2net_sv_en_voxceleb_16k`; content accuracy uses the
-shared SenseVoice ASR and 1-WER. Voice cloning remains a separate diagnostic
-section and is not added to the four-model headline score because Qwen2.5-Omni
-and Mini-Omni2 do not expose equivalent arbitrary-reference cloning inputs.
-
-To rerun only this small section and rebuild an existing main report:
-
-```bash
-bash scripts/run_voice_clone_benchmark.sh standard-YYYYMMDDTHHMMSSZ
 ```
