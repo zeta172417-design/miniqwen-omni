@@ -516,7 +516,7 @@ V1 输出：`I want you for the army`
 题目通过语音输入：
 
 
-`examples/video/audio-vision.mp4`（新的 GitHub 附件待补）
+https://github.com/user-attachments/assets/e1dcd3da-f443-460e-a12c-6a0b9743af6c
 
 
 <img src="examples/eval_samples/audio_vision/input_image.jpg" width="360" height="240" alt="图像+语音输入">
