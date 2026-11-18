@@ -1,6 +1,6 @@
 # audio_vision
 
-样本：`audio-vision-0000`
+样本：`audio-vision-0003`
 
 ## 输入
 
@@ -10,16 +10,16 @@
 语音问题的完整文字内容：
 
 ```text
-Which is right?
-A. The cat is running on the floor
-B. The cat is lying on the floor
-C. The cat is standing on the floor
-D. The cat is jumping on the floor
+How many people can you see in this picture?
+A. eight
+B. ten
+C. four
+D. one
 Answer with only the option letter.
 ```
 
 ## MiniQwen-Omni-V1 输出
 
 ```text
-The correct answer is A.
+The number of people visible in the picture is 4.
 ```

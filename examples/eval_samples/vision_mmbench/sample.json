@@ -1,13 +1,13 @@
 {
   "task": "vision_mmbench",
-  "sample_id": "vision-mmbench-0000",
-  "prompt": "Which is right?\nA. The cat is running on the floor\nB. The cat is lying on the floor\nC. The cat is standing on the floor\nD. The cat is jumping on the floor\nAnswer with only the option letter.",
+  "sample_id": "vision-mmbench-0011",
+  "prompt": "Which Python code can generate the content of the image?\nA. import re\nresult = re.match(r'(\\w+)=(\\d+)', 'set width=20 and height=10')\nprint(result)\nB. import re\nresult = re.findall(r'(\\w+)=(\\d+)', 'set width=20 and height=10')\nprint(result)\nC. import re\nresult = re.findall(r'(\\w+)=(\\d+)', 'set width=30 and height=10')\nprint(result)\nD. import re\nresult = re.findall(r'(\\w+)=(\\d+)', 'set width=20 and height=15')\nprint(result)\nAnswer with only the option letter.",
   "reference": "B",
   "choices": [
-    "The cat is running on the floor",
-    "The cat is lying on the floor",
-    "The cat is standing on the floor",
-    "The cat is jumping on the floor"
+    "import re\nresult = re.match(r'(\\w+)=(\\d+)', 'set width=20 and height=10')\nprint(result)",
+    "import re\nresult = re.findall(r'(\\w+)=(\\d+)', 'set width=20 and height=10')\nprint(result)",
+    "import re\nresult = re.findall(r'(\\w+)=(\\d+)', 'set width=30 and height=10')\nprint(result)",
+    "import re\nresult = re.findall(r'(\\w+)=(\\d+)', 'set width=20 and height=15')\nprint(result)"
   ],
   "v1_text": "B",
   "v1_audio_text": "",

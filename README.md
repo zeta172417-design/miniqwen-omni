@@ -432,11 +432,19 @@ MMBench-EN 测试图像多项选择、知识理解和格式遵循。
 
 完整指令：
 ```text
-Which is right?
-A. The cat is running on the floor
-B. The cat is lying on the floor
-C. The cat is standing on the floor
-D. The cat is jumping on the floor
+Which Python code can generate the content of the image?
+A. import re
+result = re.match(r'(\w+)=(\d+)', 'set width=20 and height=10')
+print(result)
+B. import re
+result = re.findall(r'(\w+)=(\d+)', 'set width=20 and height=10')
+print(result)
+C. import re
+result = re.findall(r'(\w+)=(\d+)', 'set width=30 and height=10')
+print(result)
+D. import re
+result = re.findall(r'(\w+)=(\d+)', 'set width=20 and height=15')
+print(result)
 Answer with only the option letter.
 ```
 
@@ -508,7 +516,7 @@ V1 输出：`I want you for the army`
 题目通过语音输入：
 
 
-https://github.com/user-attachments/assets/ab9d1141-88a9-4b10-86ea-9c481ec845b6
+`examples/video/audio-vision.mp4`（新的 GitHub 附件待补）
 
 
 <img src="examples/eval_samples/audio_vision/input_image.jpg" width="360" height="240" alt="图像+语音输入">
@@ -516,15 +524,15 @@ https://github.com/user-attachments/assets/ab9d1141-88a9-4b10-86ea-9c481ec845b6
 语音问题对应的文字内容：
 
 ```text
-Which is right?
-A. The cat is running on the floor
-B. The cat is lying on the floor
-C. The cat is standing on the floor
-D. The cat is jumping on the floor
+How many people can you see in this picture?
+A. eight
+B. ten
+C. four
+D. one
 Answer with only the option letter.
 ```
 
-V1 文本输出：`The correct answer is A.`
+V1 文本输出：`The number of people visible in the picture is 4.`
 
 ## NLVR2 双图
 

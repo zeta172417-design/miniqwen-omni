@@ -1,15 +1,15 @@
 {
   "task": "audio_vision",
-  "sample_id": "audio-vision-0000",
+  "sample_id": "audio-vision-0003",
   "prompt": "",
-  "reference": "B",
+  "reference": "C",
   "choices": [
-    "The cat is running on the floor",
-    "The cat is lying on the floor",
-    "The cat is standing on the floor",
-    "The cat is jumping on the floor"
+    "eight",
+    "ten",
+    "four",
+    "one"
   ],
-  "v1_text": "The correct answer is A.",
+  "v1_text": "The number of people visible in the picture is 4.",
   "v1_audio_text": "",
   "input_audio": "input_audio.wav",
   "input_image": "input_image.jpg"
