@@ -18,9 +18,9 @@ The repository includes small playable WAV examples. Open the GitHub page and cl
 
 | Scenario | Input | Output |
 |---|---|---|
-| Unconditioned TTS | `This outward mutability indicated ...` | <video controls preload="metadata" width="640"><source src="https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/video/v1-tts.mp4" type="video/mp4"></video> |
-| Base unconditioned TTS | same text | <video controls preload="metadata" width="640"><source src="https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/video/v1-base-tts.mp4" type="video/mp4"></video> |
-| Spoken QA | `What is an example of a chemical reaction?` | <video controls preload="metadata" width="640"><source src="https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/video/v1-audio-answer.mp4" type="video/mp4"></video> |
+| Unconditioned TTS | `This outward mutability indicated ...` | <video controls preload="metadata" width="640"><source src="https://github.com/user-attachments/assets/fd4df82d-6623-414e-bf87-c2664cb24c82" type="video/mp4"></video> |
+| Base unconditioned TTS | same text | <video controls preload="metadata" width="640"><source src="https://github.com/user-attachments/assets/e1cad318-bdbf-4b51-9696-45edd9acc918" type="video/mp4"></video> |
+| Spoken QA | `What is an example of a chemical reaction?` | <video controls preload="metadata" width="640"><source src="https://github.com/user-attachments/assets/6e0830c8-4a13-423d-84a5-3cc3ddb8cdca" type="video/mp4"></video> |
 
 Fallback links: [V1 TTS](https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/audio/v1-tts.wav) · [V1-Base TTS](https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/audio/v1-base-tts.wav) · [V1 spoken QA](https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/audio/v1-audio-answer.wav).
 
