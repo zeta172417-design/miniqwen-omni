@@ -96,7 +96,7 @@ def log_model_params(model, ignore_patterns=['audio_encoder', 'vision_encoder'])
 
 
 def load_omni_tokenizer(tokenizer_path):
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, fix_mistral_regex=True)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False, fix_mistral_regex=True)
     # Never replace Qwen's existing additional_special_tokens. Replacing the
     # list makes vision/chat controls stop participating in skip-special-token
     # handling after the tokenizer is saved.

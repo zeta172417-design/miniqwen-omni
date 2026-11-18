@@ -486,11 +486,11 @@ V1 输出：`I want you for the army`
 
 ## 图像 + 语音问题
 
-该任务同时提供图像和 spoken question，测试跨模态融合。
+该任务同时提供图像和 spoken question，测试跨模态融合。图片来自 MMBench-EN dev，spoken question 由 Kokoro-82M 使用 `af_heart` voice pack 合成。
 
 | 模型 | 正确率 ↑ |
 |---|---:|
-| **MiniQwen-Omni-V1** | **12.50%** |
+| **MiniQwen-Omni-V1** | **26.56%** |
 | Mini-Omni2 | 7.81% |
 | MiniMind-3O-MoE | 3.12% |
 | Qwen2.5-Omni-3B | 76.56% |
