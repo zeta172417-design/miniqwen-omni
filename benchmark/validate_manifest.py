@@ -90,8 +90,8 @@ def validate_manifest(
                 if not audio_path.is_absolute():
                     audio_path = manifest.parent / audio_path
                 seconds = float(sf.info(audio_path).duration)
-                if seconds <= 0.1 or seconds > 30.0:
-                    errors.append(f"{sample_id}: input audio duration {seconds:.2f}s is outside (0.1, 30]")
+                if seconds <= 0.1 or seconds > 45.0:
+                    errors.append(f"{sample_id}: input audio duration {seconds:.2f}s is outside (0.1, 45]")
             except Exception as exc:
                 errors.append(f"{sample_id}: unreadable audio: {exc}")
         paired_id = metadata.get("paired_id")
@@ -150,7 +150,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest")
     parser.add_argument("--metadata", default=None)
-    parser.add_argument("--expected-builder", default="2.3.0")
+    parser.add_argument("--expected-builder", default="2.4.0")
     parser.add_argument("--config", default=None)
     args = parser.parse_args()
     result = validate_manifest(args.manifest, args.metadata, args.expected_builder, args.config)

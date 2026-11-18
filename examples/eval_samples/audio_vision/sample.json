@@ -1,15 +1,15 @@
 {
   "task": "audio_vision",
-  "sample_id": "audio-vision-0028",
+  "sample_id": "audio-vision-0000",
   "prompt": "",
-  "reference": "D",
+  "reference": "B",
   "choices": [
-    "left",
-    "right",
-    "up",
-    "down"
+    "The cat is running on the floor",
+    "The cat is lying on the floor",
+    "The cat is standing on the floor",
+    "The cat is jumping on the floor"
   ],
-  "v1_text": "The dog is looking down at a left-beat bridge.",
+  "v1_text": "The correct answer is A.",
   "v1_audio_text": "",
   "input_audio": "input_audio.wav",
   "input_image": "input_image.jpg"

@@ -317,7 +317,7 @@ SFT 媒体使用相对于项目根目录的路径，下载数据集时必须保�
 
 # 📊 实验与评估
 
-以下结果只汇报最终模型 **MiniQwen-Omni-V1** 与外部模型的对比。评测使用同一份 v2.3 standard manifest（不含纯文本回归）、同一套 scorer 和 SenseVoice-Small 评分器；Audio→Audio QA 已从正式评测中移除，只保留 Audio→Text QA。
+以下结果只汇报最终模型 **MiniQwen-Omni-V1** 与外部模型的对比。评测使用同一份 v2.4 standard manifest（不含纯文本回归）、同一套 scorer 和 SenseVoice-Small 评分器；Audio→Audio QA 已从正式评测中移除，只保留 Audio→Text QA。
 
 ## ASR：clean 与 other
 
@@ -340,7 +340,7 @@ Transcribe the speech exactly in English.
 ```
 
 
-https://github.com/user-attachments/assets/1bcddf3b-69be-4e53-8c22-935b41d60698
+https://github.com/user-attachments/assets/696772d4-7005-4602-8b1d-7f21e7342c93
 
 V1 转写：`SIR MARCH SIXTEENTH`
 
@@ -354,7 +354,7 @@ Transcribe the speech exactly in English.
 ```
 
 
-https://github.com/user-attachments/assets/fb9547b8-9688-4161-91e3-eb6bd629f5c0
+https://github.com/user-attachments/assets/ab9d1141-88a9-4b10-86ea-9c481ec845b6
 
 V1 转写：`ALMOST AT THIS INSTANT I HEARD A PISTOL SHOT IN THE BANK`
 
@@ -378,7 +378,7 @@ V1 转写：`ALMOST AT THIS INSTANT I HEARD A PISTOL SHOT IN THE BANK`
 题目通过语音输入：
 
 
-https://github.com/user-attachments/assets/c2091d7f-6e75-436a-aa26-00f454a477ff
+https://github.com/user-attachments/assets/d9e2bca4-25d7-41db-8b9e-6e5640886bae
 
 
 V1 文本回答：`A`
@@ -405,8 +405,16 @@ What I say is altogether on your own account.
 ```
 
 
-https://github.com/user-attachments/assets/7e26fec7-ab60-45fa-a298-84c11db0ca41
+https://github.com/user-attachments/assets/90d2b0ec-2ee7-4640-8f43-37e4f1269771
 
+TTS 其他输出示例：
+
+- `v1-audio-answer.mp4`
+  https://github.com/user-attachments/assets/61b3900f-5466-4cff-860e-e137636034f8
+- `v1-base-tts.mp4`
+  https://github.com/user-attachments/assets/e29f70ad-22d6-46f2-8500-b5cdb6fb1088
+- `v1-tts.mp4`
+  https://github.com/user-attachments/assets/381ca461-fa08-4cc4-be26-81550a4354e4
 
 
 ## MMBench-EN
@@ -492,22 +500,31 @@ V1 输出：`I want you for the army`
 |---|---:|
 | **MiniQwen-Omni-V1** | **26.56%** |
 | Mini-Omni2 | 7.81% |
-| MiniMind-3O-MoE | 3.12% |
-| Qwen2.5-Omni-3B | 76.56% |
+| MiniMind-3O-MoE | 0.00% |
+| Qwen2.5-Omni-3B | 81.25% |
 
 **样例**
 
 题目通过语音输入：
 
 
-https://github.com/user-attachments/assets/1c207823-ec5c-4d6c-8eec-52dbe0f0718a
+https://github.com/user-attachments/assets/494ec964-5cdb-47b9-ba82-5bece491a443
 
 
 <img src="examples/eval_samples/audio_vision/input_image.jpg" width="360" height="240" alt="图像+语音输入">
 
-选项：`A. left`、`B. right`、`C. up`、`D. down`
+语音问题对应的文字内容：
 
-V1 文本输出：`The dog is looking down at a left-beat bridge.`
+```text
+Which is right?
+A. The cat is running on the floor
+B. The cat is lying on the floor
+C. The cat is standing on the floor
+D. The cat is jumping on the floor
+Answer with only the option letter.
+```
+
+V1 文本输出：`The correct answer is A.`
 
 ## NLVR2 双图
 
@@ -555,12 +572,12 @@ V1 输出：`A`
 
 参考音频：
 
-https://github.com/user-attachments/assets/f05718da-fe8a-45ff-8242-de28c2517675
+https://github.com/user-attachments/assets/40735bb5-d6fd-4ae7-a5d2-5066705e5d9f
 
 
 V1 输出：
 
-https://github.com/user-attachments/assets/cf55774b-76b7-4c67-b3cb-59bdd8fc78ab
+https://github.com/user-attachments/assets/125c8a2a-865a-49e3-8717-5aa454224f0f
 
 
 Speaker cosine：`0.1568`

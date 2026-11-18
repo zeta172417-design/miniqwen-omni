@@ -1,6 +1,6 @@
 {
   "run_id": "miniqwen-omni-v1-standard",
-  "manifest": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/omni-core-v2.3-standard/manifest.jsonl",
+  "manifest": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/omni-core-v2.4-standard/manifest.jsonl",
   "output_root": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-results",
   "seed": 20260913,
   "tasks": [

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the fixed English Omni Benchmark v2.3 manifests."""
+"""Prepare the fixed English Omni Benchmark v2.4 manifests."""
 from __future__ import annotations
 
 import argparse
@@ -23,7 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from benchmark.metrics import naturalize_tts_text, normalize_text
 
 
-BUILDER_VERSION = "2.3.0"
+BUILDER_VERSION = "2.4.0"
 
 
 def stable_rows(dataset, count: int, seed: int):
