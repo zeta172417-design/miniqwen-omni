@@ -14,7 +14,7 @@ from safetensors.torch import load_file as load_safetensors_file
 from dataset.omni_dataset import OmniDataset
 from model.model_omni import CodePredictor, MimiCodecEmbedding, MiniQwenOmni, MiniQwenMRoPERotaryEmbedding, OmniConfig, TalkerModule
 from trainer.trainer_utils import _attach_external_encoder, configure_token_ids, load_external_encoder_sidecars, load_omni_tokenizer, omni_checkpoint
-from trainer.train_sft_omni import build_talker_attention_mask, compute_audio_losses, configure_trainable_modules, distributed_audio_branch_enabled, init_swanlab_tracking, omni_collate_fn, trim_batch_to_active_length
+from trainer.training_common import build_talker_attention_mask, compute_audio_losses, configure_trainable_modules, distributed_audio_branch_enabled, init_swanlab_tracking, omni_collate_fn, trim_batch_to_active_length
 
 
 QWEN_PATH = "model/Qwen3-0.6B"
@@ -68,8 +68,8 @@ class MiniQwenOmniConfigTest(unittest.TestCase):
             self.assertIs(op, torch.distributed.ReduceOp.MAX)
             flag.fill_(1)
 
-        with patch('trainer.train_sft_omni.dist.is_initialized', return_value=True), patch(
-            'trainer.train_sft_omni.dist.all_reduce', side_effect=remote_rank_has_audio
+        with patch('trainer.train_sft.dist.is_initialized', return_value=True), patch(
+            'trainer.train_sft.dist.all_reduce', side_effect=remote_rank_has_audio
         ):
             self.assertTrue(distributed_audio_branch_enabled(no_local_audio))
 
@@ -736,7 +736,7 @@ class MiniQwenOmniConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             # The DSW CPU-only test subprocess can make Accelerate import an
             # unrelated broken DeepSpeed CPU backend. Training checkpoints run
-            # with PPU available; bypass only that wrapper in this unit test.
+            # with GPU available; bypass only that wrapper in this unit test.
             with patch('transformers.modeling_utils.unwrap_model', lambda value, **_: value):
                 model.save_pretrained(tmp, safe_serialization=True)
             reloaded = MiniQwenOmni.from_pretrained(

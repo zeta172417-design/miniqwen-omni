@@ -107,10 +107,15 @@ class MiniQwenAdapter(ModelAdapter):
         newline_ids = self.tokenizer.encode("\n", add_special_tokens=False)
         audio_frames, final_ids, first_text, first_audio = [], None, None, None
         with torch.inference_mode():
+            thinker_limit = int(sample.metadata.get("thinker_max_new_tokens", min(self.max_new_tokens, int(sample.metadata.get("max_new_tokens", self.max_new_tokens)))))
+            talker_limit = int(sample.metadata.get("talker_max_new_tokens", min(self.max_new_tokens, int(sample.metadata.get("max_new_tokens", self.max_new_tokens)))))
             stream = self.model.generate(
                 input_ids,
-                max_new_tokens=min(self.max_new_tokens, int(sample.metadata.get("max_new_tokens", self.max_new_tokens))),
+                max_new_tokens=talker_limit,
+                thinker_max_new_tokens=thinker_limit,
+                talker_max_new_tokens=talker_limit,
                 temperature=1.0, top_k=1, top_p=1.0,
+                do_sample=False, talker_do_sample=True,
                 stream=True,
                 return_audio_codes=self.return_audio and sample.metadata.get("require_audio", True),
                 open_thinking=False,
@@ -212,6 +217,7 @@ class MiniQwenAdapter(ModelAdapter):
                 attention_mask=attention_mask.to(self.device),
                 max_new_tokens=signature[3],
                 temperature=1.0, top_k=1, top_p=1.0,
+                do_sample=False, talker_do_sample=True,
                 return_audio_codes=signature[2],
                 seeds=[seeds[index] for index in indices],
                 open_thinking=False,

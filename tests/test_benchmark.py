@@ -34,14 +34,12 @@ class BenchmarkTests(unittest.TestCase):
         config = json.loads((root / "benchmark/configs/standard.json").read_text())
         counts = config["counts"]
         main_samples = (
-            counts["arc_easy"] + counts["boolq"] + counts["piqa"]
-            + counts["spoken_qa"] * 2
+            counts["spoken_qa"]
             + counts["librispeech_clean"] + counts["librispeech_other"]
             + counts["tts"] + counts["mmbench_en"] + counts["pope"]
             + counts["textvqa"] + counts["audio_vision"] + counts["nlvr2"]
         )
-        self.assertEqual(main_samples, 752)
-        self.assertEqual(counts["arc_easy"] + counts["boolq"] + counts["piqa"], 32)
+        self.assertEqual(main_samples, 640)
 
     def test_sample_resolves_ordered_multi_image_paths(self):
         sample = BenchmarkSample.from_dict({

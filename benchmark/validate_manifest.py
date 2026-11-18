@@ -17,9 +17,7 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 def expected_task_counts(config: dict[str, Any]) -> dict[str, int]:
     counts = config["counts"]
     return {
-        "text_regression": int(counts["arc_easy"] + counts["boolq"] + counts["piqa"]),
         "spoken_qa_a2t": int(counts["spoken_qa"]),
-        "spoken_qa_a2a": int(counts["spoken_qa"]),
         "asr_clean": int(counts["librispeech_clean"]),
         "asr_other": int(counts["librispeech_other"]),
         "tts": int(counts["tts"]),

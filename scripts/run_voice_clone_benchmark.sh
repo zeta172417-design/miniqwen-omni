@@ -10,7 +10,7 @@ PROFILE=${OMNI_CLONE_PROFILE:-standard}
 DATA_DIR=${OMNI_CLONE_DATA:-$WORKSPACE/benchmark-data/voice-clone-v2.3-$PROFILE}
 MAIN_MANIFEST=${OMNI_BENCH_MANIFEST:-$WORKSPACE/benchmark-data/omni-core-v2.3-$PROFILE/manifest.jsonl}
 CONFIG=${OMNI_BENCH_CONFIG:-$PROJECT_ROOT/benchmark/configs/models.json}
-MODELS=${OMNI_CLONE_MODELS:-miniqwen-v0,miniqwen-v0.1,minimind-3o-moe}
+MODELS=${OMNI_CLONE_MODELS:-miniqwen-v1-base,miniqwen-v1,minimind-3o-moe}
 DEVICES=${OMNI_CLONE_DEVICES:-0,1,2,3}
 WORKERS_PER_DEVICE=${OMNI_CLONE_WORKERS_PER_DEVICE:-2}
 SCORE_DEVICE=${OMNI_CLONE_SCORE_DEVICE:-0}
@@ -65,12 +65,12 @@ if (( NUM_SHARDS < 1 )); then
   exit 2
 fi
 for model in "${MODEL_LIST[@]}"; do
-  echo "Concurrency: $WORKERS_PER_DEVICE process(es) per PPU, $NUM_SHARDS total data shards"
+  echo "Concurrency: $WORKERS_PER_DEVICE process(es) per GPU, $NUM_SHARDS total data shards"
   echo "=== Voice clone: $model ($NUM_SHARDS data-parallel shards) ==="
   pids=()
   for shard_index in "${!DEVICE_LIST[@]}"; do
     device=${DEVICE_LIST[$shard_index]}
-    echo "Voice clone: $model shard $((shard_index + 1))/$NUM_SHARDS on PPU $device"
+    echo "Voice clone: $model shard $((shard_index + 1))/$NUM_SHARDS on GPU $device"
     env CUDA_VISIBLE_DEVICES="$device" "$PYTHON_BIN" -u "$PROJECT_ROOT/benchmark/run_voice_clone.py" \
       --config "$CONFIG" --model "$model" --manifest "$DATA_DIR/manifest.jsonl" \
       --run-dir "$RUN_DIR" --device cuda --resume \
@@ -85,7 +85,7 @@ for model in "${MODEL_LIST[@]}"; do
   echo "=== Voice clone generation complete: $model ==="
 done
 
-echo "Voice-clone scoring on PPU $SCORE_DEVICE"
+echo "Voice-clone scoring on GPU $SCORE_DEVICE"
 UTMOS_ARGS=()
 if [[ -n "$UTMOS_REPO" ]]; then
   UTMOS_ARGS+=(--utmos-repo "$UTMOS_REPO")
@@ -93,6 +93,13 @@ fi
 env CUDA_VISIBLE_DEVICES="$SCORE_DEVICE" "$PYTHON_BIN" -u "$PROJECT_ROOT/benchmark/evaluate_voice_clone.py" \
   --run-dir "$RUN_DIR" --manifest "$DATA_DIR/manifest.jsonl" --models "$MODELS" --device cuda:0 \
   "${UTMOS_ARGS[@]}"
+
+if [[ "${OMNI_CLONE_COSINE_ONLY:-1}" == "1" ]]; then
+  "$PYTHON_BIN" -u "$PROJECT_ROOT/benchmark/evaluate_voice_clone_cosine.py" \
+    --run-dir "$RUN_DIR" --manifest "$DATA_DIR/manifest.jsonl" \
+    --models "$MODELS" --speaker-model "$PROJECT_ROOT/model/eres2net_sv_en_voxceleb_16k" \
+    --device "$SCORE_DEVICE"
+fi
 
 if [[ ${OMNI_CLONE_BUILD_REPORT:-1} == 1 ]]; then
   "$PYTHON_BIN" "$PROJECT_ROOT/benchmark/build_report.py" --run-dir "$RUN_DIR"

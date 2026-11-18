@@ -274,42 +274,12 @@ def main() -> None:
 
     rows: list[dict[str, Any]] = []
 
-    # Small text-only regression gate. Extra ARC rows supply spoken QA without
-    # spending benchmark budget on a large text suite.
-    arc_count = counts["arc_easy"] + max(counts["spoken_qa"] * 3, counts["spoken_qa"] + 20)
+    # Use ARC rows only as a source pool for spoken QA; pure text regression is not benchmarked.
+    arc_count = max(counts["spoken_qa"] * 3, counts["spoken_qa"] + 20)
     arc_all = stable_rows(load(config["sources"]["arc_easy"], "test", "ARC-Easy"), arc_count, seed)
-    for i, row in enumerate(arc_all[: counts["arc_easy"]]):
-        choices = list(row["choices"]["text"])
-        rows.append({
-            "sample_id": f"text-arc-{i:04d}", "task": "text_regression", "metric": "mcq",
-            "prompt": mcq_prompt(row["question"], choices),
-            "reference": canonical_arc_answer(row["answerKey"], choices),
-            "choices": choices, "source": "allenai/ai2_arc:ARC-Easy:test",
-            "metadata": task_metadata("text_retention", "text", "mcq"),
-        })
-    boolq = stable_rows(load(config["sources"]["boolq"], "validation"), counts["boolq"], seed + 1)
-    for i, row in enumerate(boolq):
-        choices = ["Yes", "No"]
-        rows.append({
-            "sample_id": f"text-boolq-{i:04d}", "task": "text_regression", "metric": "mcq",
-            "prompt": mcq_prompt(row["question"], choices, row["passage"]),
-            "reference": "A" if row["answer"] else "B", "choices": choices,
-            "source": "google/boolq:validation", "metadata": task_metadata("text_retention", "text", "mcq"),
-        })
-    piqa = stable_rows(load(config["sources"]["piqa"], "validation"), counts["piqa"], seed + 2)
-    for i, row in enumerate(piqa):
-        choices = list(row["choices"])
-        rows.append({
-            "sample_id": f"text-piqa-{i:04d}", "task": "text_regression", "metric": "mcq",
-            "prompt": mcq_prompt(row["question"], choices),
-            "reference": canonical_zero_based_answer(
-                row.get("answer_index") if row.get("answer_index") is not None else row.get("answer"), choices,
-            ), "choices": choices,
-            "source": "extraordinarylab/piqa:validation", "metadata": task_metadata("text_retention", "text", "mcq"),
-        })
 
     spoken = []
-    for base in arc_all[counts["arc_easy"]:]:
+    for base in arc_all:
         choices = list(base["choices"]["text"])
         prompt = mcq_prompt(base["question"], choices)
         if len(prompt.split()) > 70:
@@ -331,13 +301,6 @@ def main() -> None:
         rows.append({
             **common, "sample_id": f"spoken-a2t-{i:04d}", "task": "spoken_qa_a2t",
             "metadata": task_metadata("speech_understanding", "text", "mcq", transcript_prompt=prompt),
-        })
-        rows.append({
-            **common, "sample_id": f"spoken-a2a-{i:04d}", "task": "spoken_qa_a2a",
-            "metadata": task_metadata(
-                "speech_understanding", "text_audio", "mcq", transcript_prompt=prompt,
-                paired_id=f"spoken-a2t-{i:04d}",
-            ),
         })
 
     # Natural speech for ASR and disjoint target sentences/natural labels for TTS.
@@ -547,7 +510,7 @@ def main() -> None:
         "perturbation": "clean", "metadata": {},
     }
     training_paths = args.training_parquet or [
-        str(PROJECT_ROOT / "dataset" / name)
+        str(PROJECT_ROOT / "dataset" / "raw" / "legacy" / name)
         for name in ("sft_t2a.parquet", "sft_a2a.parquet", "sft_i2t.parquet")
     ]
     if args.skip_decontamination:

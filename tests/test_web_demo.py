@@ -108,8 +108,8 @@ class WebDemoTests(unittest.TestCase):
         runtime = Runtime(
             None, None, None, None, {}, "cpu", None, 30,
             models={
-                "v01": ModelRuntime("V0.1", None, None),
-                "v0": ModelRuntime("V0", None, None),
+                "v1": ModelRuntime("MiniQwen-Omni-V1", None, None),
+                "base": ModelRuntime("MiniQwen-Omni-V1-Base", None, None),
             },
         )
         args = SimpleNamespace(open_thinking=False, max_text_chars=4000)

@@ -1,0 +1,21 @@
+{
+  "task": "vision_textvqa",
+  "sample_id": "vision-textvqa-0005",
+  "prompt": "who is wanted in the army?\nAnswer using a short phrase only.",
+  "reference": [
+    "you",
+    "you",
+    "you",
+    "you",
+    "you",
+    "you",
+    "you",
+    "you",
+    "you",
+    "you"
+  ],
+  "choices": [],
+  "v1_text": "I want you for the army",
+  "v1_audio_text": "",
+  "input_image": "input_image.jpg"
+}

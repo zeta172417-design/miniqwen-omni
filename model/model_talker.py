@@ -125,7 +125,13 @@ class TalkerAttention(nn.Module):
             output = F.scaled_dot_product_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=self.is_causal)
         else:
             scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            if self.is_causal: scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
+            # GPU softmax kernels can propagate NaN when logits contain
+            # literal -inf. A large finite sentinel is equivalent for this
+            # causal mask and is stable on both CUDA and GPU.
+            if self.is_causal:
+                scores[:, :, :, -seq_len:] += torch.full(
+                    (seq_len, seq_len), -1e9, device=scores.device, dtype=scores.dtype,
+                ).triu(1)
             if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
             output = self.attn_dropout(F.softmax(scores.float(), dim=-1).type_as(xq)) @ xv
         output = output.transpose(1, 2).reshape(bsz, seq_len, -1)

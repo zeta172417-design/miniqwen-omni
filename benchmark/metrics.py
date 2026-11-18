@@ -20,7 +20,7 @@ CAPABILITY_WEIGHTS = {
 
 REQUIRED_TASKS = {
     "asr": ("asr_clean", "asr_other"),
-    "speech_understanding": ("spoken_qa_a2t", "spoken_qa_a2a"),
+    "speech_understanding": ("spoken_qa_a2t",),
     "speech_generation": ("tts",),
     "vision": ("vision_mmbench", "vision_pope", "vision_textvqa"),
     "cross_modal": ("audio_vision", "multi_image"),

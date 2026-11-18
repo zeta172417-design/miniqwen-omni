@@ -25,7 +25,7 @@ license: apache-2.0
 
 # MiniQwen-Omni
 
-This is the **V0.1 frozen-encoder release**. MiniQwen-Omni uses Qwen3-0.6B as
+This is the **MiniQwen-Omni-V1 release**. MiniQwen-Omni uses Qwen3-0.6B as
 its 28-layer, 1024-dimensional Thinker and a
 6-layer, 768-dimensional Talker that predicts eight Mimi audio codebooks. The
 default bridge consumes Thinker layer 14 and projects 1024-dimensional hidden
@@ -48,7 +48,7 @@ evaluate safety, factuality, speech quality, and language coverage before use.
 from modelscope import snapshot_download
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-repo = "peachPPP/MiniQwen-Omni-V0.1"
+repo = "peachPPP/MiniQwen-Omni-V1"
 local_dir = snapshot_download(repo)
 tokenizer = AutoTokenizer.from_pretrained(local_dir, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
@@ -75,6 +75,10 @@ def parse_args():
     parser.add_argument("--checkpoint", required=True, type=Path, help="FP32 HF training checkpoint")
     parser.add_argument("--output", required=True, type=Path, help="new output directory")
     parser.add_argument("--max-shard-size", default="5GB", help="Transformers shard-size limit")
+    parser.add_argument("--model-name", default="MiniQwen-Omni-V1",
+                        help="Published model name used in the generated model card")
+    parser.add_argument("--repo-id", default=None,
+                        help="Optional ModelScope repo id shown in the model card")
     return parser.parse_args()
 
 
@@ -104,6 +108,17 @@ def main():
     model.eval().to(dtype=torch.bfloat16)
     model.config.dtype = torch.bfloat16
     model.config.architectures = ["MiniQwenOmni"]
+    # Publish the Qwen3-Omni Talker defaults with the model so a downloaded
+    # checkpoint does not retain the obsolete 0.2/0.8 codec sampling values.
+    model.config.main_codec_temperature = 0.9
+    model.config.main_codec_top_k = 50
+    model.config.main_codec_top_p = 1.0
+    model.config.residual_codec_temperature = 1.0
+    model.config.residual_codec_top_k = 50
+    model.config.residual_codec_top_p = 0.8
+    model.config.talker_repetition_penalty = 1.05
+    model.config.do_sample = False
+    model.config.talker_do_sample = True
 
     # Some shared DSW images expose an unrelated/broken DeepSpeed install.
     # Accelerate imports it only to decide whether this plain nn.Module needs
@@ -120,7 +135,11 @@ def main():
         max_shard_size=args.max_shard_size,
     )
     tokenizer.save_pretrained(output)
-    (output / "README.md").write_text(MODEL_CARD, encoding="utf-8")
+    card = MODEL_CARD.replace("MiniQwen-Omni-V1 release", f"{args.model_name} release")
+    if args.repo_id:
+        card = card.replace('repo = "peachPPP/MiniQwen-Omni-V1"',
+                            f'repo = "{args.repo_id}"')
+    (output / "README.md").write_text(card, encoding="utf-8")
 
     forbidden = [output / "trainer_state.pt", output / "optimizer.pt"]
     if any(path.exists() for path in forbidden):

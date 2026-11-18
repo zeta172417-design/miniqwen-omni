@@ -3,9 +3,6 @@
   "profile": "standard",
   "seed": 20260917,
   "counts": {
-    "arc_easy": 12,
-    "boolq": 10,
-    "piqa": 10,
     "spoken_qa": 80,
     "librispeech_clean": 80,
     "librispeech_other": 80,

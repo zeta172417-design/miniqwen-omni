@@ -1,0 +1,10 @@
+{
+  "task": "asr_other",
+  "sample_id": "asr-other-0001",
+  "prompt": "Transcribe the speech exactly in English.",
+  "reference": "ALMOST AT THIS INSTANT I HEARD A PISTOL SHOT IN THE BANK",
+  "choices": [],
+  "v1_text": "ALMOST AT THIS INSTANT I HEARD A PISTOL SHOT IN THE BANK",
+  "v1_audio_text": "",
+  "input_audio": "input_audio.flac"
+}

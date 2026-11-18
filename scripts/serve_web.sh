@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
-source envs/Omni-ppu/bin/activate
+source .venv/bin/activate
 
 : "${MINIQWEN_WEB_PASSWORD:?Set MINIQWEN_WEB_PASSWORD (at least 8 characters)}"
 if (( ${#MINIQWEN_WEB_PASSWORD} < 8 )); then
@@ -20,7 +20,7 @@ export TRANSFORMERS_VERBOSITY=error
 export HF_HUB_DISABLE_TELEMETRY=1
 export GRADIO_ANALYTICS_ENABLED=False
 export NCCL_DEBUG=ERROR
-export PCCL_DEBUG=ERROR
+export NCCL_DEBUG=ERROR
 export TORCH_CPP_LOG_LEVEL=ERROR
 export NO_PROXY="127.0.0.1,localhost,0.0.0.0${NO_PROXY:+,${NO_PROXY}}"
 export no_proxy="${NO_PROXY}"
@@ -38,8 +38,8 @@ if [[ -n "${MINIQWEN_WEB_PROXY:-}" ]]; then
 fi
 
 web_args=(
-  --model-path "${MINIQWEN_MODEL_PATH:-${PROJECT_ROOT}/out/miniqwen_omni_full_main_codec_cp_v5/checkpoint}"
-  --baseline-model-path "${MINIQWEN_V0_MODEL_PATH:-${PROJECT_ROOT}/out/miniqwen_omni_full/checkpoint}"
+  --model-path "${MINIQWEN_MODEL_PATH:-${PROJECT_ROOT}/out/miniqwen_sft/last/checkpoint}"
+  --baseline-model-path "${MINIQWEN_BASE_MODEL_PATH:-${PROJECT_ROOT}/out/miniqwen_pretrain/tts/last/checkpoint}"
   --audio-encoder "${MINIQWEN_AUDIO_ENCODER:-${PROJECT_ROOT}/model/SenseVoiceSmall}"
   --vision-model "${MINIQWEN_VISION_MODEL:-${PROJECT_ROOT}/model/siglip2-base-p32-256-ve}"
   --mimi-path "${MINIQWEN_MIMI_PATH:-${PROJECT_ROOT}/model/mimi}"

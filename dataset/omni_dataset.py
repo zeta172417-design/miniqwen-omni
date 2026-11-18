@@ -3,18 +3,18 @@ import os
 import math
 import random
 import numpy as np
+from dataset.voice_conditioning import choose_voice_mode
 import soundfile as sf
 import librosa
 import json
 import io
 import time
-import itertools
+import hashlib
 from PIL import Image
 from scipy.signal import resample
 from torch.utils.data import Dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
-import datasets as hf_datasets
 import torch.distributed as dist
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -61,58 +61,15 @@ class OmniDataset(Dataset):
                  audio_head_type='main_codec_predictor',
                  use_modality_boundaries=False,
                  use_talker_ref_boundaries=False,
-                 training=True):
+                 training=True, augment=True, strict_length=False,
+                 condition_prefix_length=160, voice_conditioning='legacy', condition_seed=20261108):
         super().__init__()
         paths = [p.strip() for p in data_path.split(',')]
-        cache_dir = os.environ.get('MINIQWEN_DATASET_CACHE', os.path.join(os.path.dirname(paths[0]), '.miniqwen_cache'))
-        parquet_batch_size = int(os.environ.get('MINIQWEN_PARQUET_BATCH_SIZE', '4096'))
-        if parquet_batch_size <= 0:
-            raise ValueError('MINIQWEN_PARQUET_BATCH_SIZE must be positive')
-        hf_datasets.disable_progress_bars()
-
-        def load_mapped_dataset():
-            # Hugging Face's packaged parquet reader uses a Dataset Scanner.
-            # For the full A2A file its single 414k-row group contains a nested
-            # binary column above 2 GiB, and the scanner fails before applying
-            # its requested batch size. ParquetFile.iter_batches streams the
-            # exact same file correctly, so use it to feed the regular HF Arrow
-            # cache writer. The returned object remains a memory-mapped Dataset.
-            builder = hf_datasets.load_dataset_builder(
-                'parquet',
-                data_files=paths,
-                cache_dir=cache_dir,
-                batch_size=parquet_batch_size,
-            )
-
-            def generate_tables(files):
-                for file_idx, file_path in enumerate(itertools.chain.from_iterable(files)):
-                    with open(file_path, 'rb') as parquet_stream:
-                        parquet_file = pq.ParquetFile(parquet_stream)
-                        for batch_idx, record_batch in enumerate(parquet_file.iter_batches(
-                            batch_size=parquet_batch_size,
-                            columns=builder.config.columns,
-                            use_threads=False,
-                        )):
-                            table = pa.Table.from_batches([record_batch])
-                            yield f'{file_idx}_{batch_idx}', builder._cast_table(table)
-
-            builder._generate_tables = generate_tables
-            builder.download_and_prepare()
-            return builder.as_dataset(split='train', in_memory=False)
-
+        from dataset.parquet_reader import ParquetRows
         started = time.time()
-        if dist.is_initialized() and dist.get_world_size() > 1:
-            if dist.get_rank() == 0:
-                print(f'准备数据集缓存: {",".join(paths)} (parquet batch={parquet_batch_size})', flush=True)
-                self.dataset = load_mapped_dataset()
-            dist.barrier()
-            if dist.get_rank() != 0:
-                self.dataset = load_mapped_dataset()
-        else:
-            print(f'准备数据集缓存: {",".join(paths)} (parquet batch={parquet_batch_size})', flush=True)
-            self.dataset = load_mapped_dataset()
+        self.dataset = ParquetRows(paths, cache_bytes=int(os.environ.get('MINIQWEN_PARQUET_MEMORY_CACHE_MIB','128'))*1024**2)
         if not dist.is_initialized() or dist.get_rank() == 0:
-            print(f'数据集已就绪: {len(self.dataset)} samples, {time.time() - started:.1f}s', flush=True)
+            print(f'Parquet直接读取已就绪: {len(self.dataset)} samples, {time.time() - started:.1f}s; 无磁盘缓存', flush=True)
         self.tokenizer = tokenizer
         self.audio_processor = audio_processor
         self.vision_processor = vision_processor
@@ -142,6 +99,14 @@ class OmniDataset(Dataset):
         if self.audio_head_type not in {'main_codec_predictor', 'legacy_parallel_delay'}:
             raise ValueError(f'unsupported audio_head_type: {self.audio_head_type}')
         self.training = bool(training)
+        self.augment_enabled = bool(augment)
+        self.strict_length = bool(strict_length)
+        self.condition_prefix_length = int(condition_prefix_length)
+        self.voice_conditioning = voice_conditioning
+        self.condition_epoch = 0
+        self.condition_seed = condition_seed
+        if voice_conditioning not in {'legacy', 'mixed', 'available_mixed', 'task_mixed', 'available_both', 'both', 'speaker', 'reference'}:
+            raise ValueError(f'Unsupported voice conditioning: {voice_conditioning}')
         self.scheduled_sampling_prob = scheduled_sampling if self.training else 0.0
         self.text_vocab_size = len(tokenizer)
         # tokenizer.vocab_size excludes Qwen's added control tokens.  Random
@@ -174,6 +139,10 @@ class OmniDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+    def set_condition_epoch(self, epoch: int):
+        """Change the deterministic voice dropout draw for a later epoch."""
+        self.condition_epoch = int(epoch)
+
     @staticmethod
     def process_audio(audio_path, audio_processor):
         """加载音频并预处理成fbank，返回 (fbank (T,560), valid_len=encoder输出帧数)"""
@@ -185,7 +154,7 @@ class OmniDataset(Dataset):
         return inputs.input_features.squeeze(0), valid_len
 
     def augment_wav(self, wav, sr=16000):
-        if not self.training:
+        if not self.training or not getattr(self, 'augment_enabled', True):
             return np.asarray(wav, dtype=np.float32)
         # 随机变速(0.7~1.6x)：改变音频时长和音调，覆盖快/慢语速
         if random.random() < 0.5:
@@ -221,7 +190,7 @@ class OmniDataset(Dataset):
         return np.clip(wav, -1.0, 1.0).astype(np.float32)
 
     def augment_mel(self, fbank):
-        if not self.training:
+        if not self.training or not getattr(self, 'augment_enabled', True):
             return fbank
         # fbank: (T, 560) — SenseVoice LFR 后的特征（时间维在前，频率维在后）
         T, D = fbank.shape
@@ -287,15 +256,24 @@ class OmniDataset(Dataset):
             return self.audio_start_token + payload + self.audio_end_token
         return payload
 
-    def create_chat_prompt(self, conversations, audio_features_length=0):
-        conversations = pre_processing_chat(conversations, add_system_ratio=0.2 if self.training else 0.0)
+    def create_chat_prompt(self, conversations, audio_features_length=0, task_type=None):
+        conversations = pre_processing_chat(conversations, add_system_ratio=0.2 if self.training and getattr(self, 'augment_enabled', True) else 0.0)
         messages = []
         is_last_user = lambda i: i == max(j for j, t in enumerate(conversations) if t['role'] == 'user')
         for idx, turn in enumerate(conversations):
             role, content = turn['role'], turn['content']
             if role == 'user' and is_last_user(idx) and audio_features_length > 0:
                 ap = self.format_audio_tokens(audio_features_length)
-                if not self.training:
+                if task_type == 'asr':
+                    # In explicitly typed ASR rows the user text is an external
+                    # instruction, never the waveform's transcript. Preserve
+                    # both instruction and audio at train and evaluation time.
+                    content = content + '\n' + ap
+                elif task_type == 'audio_response':
+                    # Explicit audio-response views must not leak the spoken
+                    # question through its stored transcript during training.
+                    content = ap
+                elif not self.training:
                     # Do not leak an audio question's transcript through the
                     # text channel during evaluation.
                     content = ap
@@ -305,7 +283,7 @@ class OmniDataset(Dataset):
                     elif r < 0.6: content = content
                     elif r < 0.8: content = ap + '\n\n' + content
                     else: content = content + '\n\n' + ap
-            if self.training and content.count('<image>') == 1:
+            if self.training and getattr(self, 'augment_enabled', True) and content.count('<image>') == 1:
                 r = random.random()
                 if r < 0.2: content = '<image>\n' + content.replace('<image>', '').strip()
                 elif r < 0.4: content = '<image>\n\n' + content.replace('<image>', '').strip()
@@ -465,6 +443,8 @@ class OmniDataset(Dataset):
         return input_ids, valid
 
     def __getitem__(self, index: int):
+        if isinstance(index, tuple):
+            index, self.condition_epoch = index
         row = self.dataset[index]
         conversations = json.loads(row['conversations'])
         question_audios = row.get('question_audios') or []
@@ -476,7 +456,7 @@ class OmniDataset(Dataset):
         
         # 随机截断到某一轮（每轮=user+assistant）
         asst_indices = [i for i, t in enumerate(conversations) if t['role'] == 'assistant']
-        if self.training and len(asst_indices) > 1:
+        if self.training and getattr(self, 'augment_enabled', True) and len(asst_indices) > 1:
             rand_idx = random.randint(0, len(asst_indices) - 1)
             # 从随机轮次开始，向前回退直到长度安全
             for i in range(rand_idx, -1, -1):
@@ -523,6 +503,8 @@ class OmniDataset(Dataset):
         if answer_audios and asst_count > 0 and asst_count <= len(answer_audios):
             tokens = answer_audios[asst_count - 1]
             if tokens:
+                if getattr(self, 'strict_length', False) and len(tokens) % 8:
+                    raise ValueError(f'sample {index}: incomplete Mimi frame')
                 audio_codes_8layers = [[] for _ in range(8)]
                 for i in range(0, len(tokens) - 7, 8):
                     for j in range(8): audio_codes_8layers[j].append(tokens[i + j])
@@ -532,13 +514,16 @@ class OmniDataset(Dataset):
                 last_audio_codes = audio_codes_8layers
         
         # 生成prompt (text input_ids)
-        prompt = self.create_chat_prompt(conversations, audio_features_length)
+        prompt = self.create_chat_prompt(conversations, audio_features_length, task_type=row.get('task_type'))
         if pixel_values is not None: prompt = prompt.replace('<image>', self.image_token)
         full_ids = self.tokenizer(prompt, add_special_tokens=False).input_ids
+        prefix = getattr(self, 'condition_prefix_length', 0) if last_audio_codes and (ref_audios or spk_emb_raw) else 0
+        if (prefix or getattr(self, 'strict_length', False)) and len(full_ids) + prefix > self.max_length:
+            raise ValueError(f'sample {index}: full text/modality length {len(full_ids)+prefix} exceeds {self.max_length}; no silent truncation')
         unpadded_ids = self.truncate_for_training(full_ids)
         unpadded_ids, valid_image_markers = self.sanitize_image_markers(unpadded_ids, image_count)
-        attention_mask = [1] * len(unpadded_ids)
-        input_ids = list(unpadded_ids)
+        attention_mask = [0] * prefix + [1] * len(unpadded_ids)
+        input_ids = [self.tokenizer.pad_token_id] * prefix + list(unpadded_ids)
 
         # If a too-long modality could not fit alongside the assistant target,
         # disable its encoder input for this sample as no injection marker is
@@ -555,15 +540,20 @@ class OmniDataset(Dataset):
         
         # 生成labels（只训练最后一个assistant）
         text_labels, assistant_ranges = self.generate_text_labels(input_ids)
-        for start, end in assistant_ranges[:-1]:
-            mask_end = min(end + len(self.assistant_end_ids), self.max_length)
-            text_labels[start:mask_end] = [-100] * (mask_end - start)
+        supervision_policy = row.get('supervision_policy') or 'last_assistant'
+        if supervision_policy not in {'last_assistant', 'all_assistant_text', 'all_text_last_audio'}:
+            raise ValueError(f'Unknown supervision policy: {supervision_policy}')
+        if supervision_policy == 'last_assistant':
+            for start, end in assistant_ranges[:-1]:
+                mask_end = min(end + len(self.assistant_end_ids), self.max_length)
+                text_labels[start:mask_end] = [-100] * (mask_end - start)
         
         # Generate eight aligned codec streams. The new head treats every
         # column as one real Mimi frame; the legacy branch retains its old
         # delayed layout solely for loading old checkpoints.
         Y_audio_layers = [[self.audio_pad_token] * self.max_length for _ in range(8)]
         audio_labels = [[-100] * self.max_length for _ in range(8)]
+        has_spk = False
         if assistant_ranges and last_audio_codes:
             assistant_start, assistant_end = assistant_ranges[-1]
             for pos in range(assistant_start, assistant_end):
@@ -573,7 +563,30 @@ class OmniDataset(Dataset):
             # Talker-only conditioning prefix. ref/spk never enter the Thinker
             # text sequence: [SPK][REF_START][ref codes...][REF_END].
             has_spk = bool(spk_emb_raw)
-            has_ref = bool(ref_audios) and (not self.training or random.random() > 0.5)
+            policy = getattr(self, 'voice_conditioning', 'legacy')
+            if policy == 'legacy':
+                has_ref = bool(ref_audios) and (not self.training or random.random() > 0.5)
+            else:
+                mode = policy
+                if mode == 'available_both':mode = 'both'
+                if mode in {'mixed', 'available_mixed'}:
+                    key = f"{self.condition_seed}:{row.get('sample_id', index)}"
+                    bucket = int(hashlib.sha256(key.encode()).hexdigest()[:8], 16) % 100
+                    mode = 'both' if bucket < 70 else 'speaker' if bucket < 90 else 'reference'
+                if mode == 'task_mixed':
+                    _, mode = choose_voice_mode(row, self.condition_seed, getattr(self, 'condition_epoch', 0))
+                if mode != 'none' and (row.get('voice_self_fallback') or not ref_audios):
+                    mode = 'speaker'
+                if policy.startswith('available_') and ref_audios and not spk_emb_raw:
+                    mode = 'reference'
+                has_spk = bool(spk_emb_raw) and mode in {'both', 'speaker'}
+                has_ref = bool(ref_audios) and mode in {'both', 'reference'}
+                if not has_spk and not has_ref and mode != 'none' and policy != 'task_mixed' and not policy.startswith('available_'):
+                    raise ValueError(f'sample {index}: requested voice condition is unavailable')
+            if getattr(self, 'strict_length', False) and has_ref and len(ref_audios) % 8:
+                raise ValueError(f'sample {index}: incomplete reference Mimi frame')
+            if prefix and has_ref and len(ref_audios) // 8 + 2 + int(has_spk) > prefix:
+                raise ValueError(f'sample {index}: reference exceeds dedicated prefix budget')
             spk_reserve = 1 if has_spk else 0
             if has_ref:
                 ref_codes = [[] for _ in range(8)]
@@ -621,6 +634,8 @@ class OmniDataset(Dataset):
                 Y_audio_layers[0][assistant_start] = self.audio_bos_token
                 # Reserve one final target slot for Main EOS.
                 available_frames = max(0, self.max_length - assistant_start - 2)
+                if getattr(self, 'strict_length', False) and len(last_audio_codes[0]) > available_frames:
+                    raise ValueError(f'sample {index}: full target audio does not fit; no silent codec truncation')
                 frame_count = min(len(last_audio_codes[0]), available_frames)
                 for frame_idx in range(frame_count):
                     input_pos = assistant_start + 1 + frame_idx
@@ -658,7 +673,7 @@ class OmniDataset(Dataset):
             raise ValueError(f"sample {index} has no audio labels after truncation")
         
         input_ids = self.apply_scheduled_sampling(input_ids, audio_labels, text_labels)
-        spk_emb = torch.tensor(spk_emb_raw, dtype=torch.float32) if spk_emb_raw else torch.zeros(192)
+        spk_emb = torch.tensor(spk_emb_raw, dtype=torch.float32) if has_spk and spk_emb_raw else torch.zeros(192)
         return input_ids, attention_mask, text_labels, audio_labels, audio_inputs, audio_len, pixel_values, spk_emb
 
 

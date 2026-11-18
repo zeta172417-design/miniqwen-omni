@@ -1,3 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+torchaudio==2.6.0
+torchvision==0.21.0
+
 datasets==3.6.0
 soundfile==0.13.1
 librosa==0.11.0
@@ -12,6 +17,3 @@ scipy==1.17.1
 Pillow==11.3.0
 swanlab==0.9.8
 modelscope==1.37.0
-# torch==2.6
-# torchaudio==2.6
-# torchvision==0.21.0

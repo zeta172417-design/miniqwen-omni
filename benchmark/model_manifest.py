@@ -64,9 +64,9 @@ def main():
                 "code_commit": git_value(miniqwen, "rev-parse", "HEAD"),
                 "code_dirty": bool(git_value(miniqwen, "status", "--porcelain")),
                 "checkpoints": {
-                    "v0.1": {
-                        "path": str(miniqwen / "out/miniqwen_omni_full_main_codec_cp_v5/checkpoint"),
-                        "files": files(miniqwen / "out/miniqwen_omni_full_main_codec_cp_v5/checkpoint"),
+                    "MiniQwen-Omni-V1": {
+                        "path": str(miniqwen / "out/miniqwen_sft/last/checkpoint"),
+                        "files": files(miniqwen / "out/miniqwen_sft/last/checkpoint"),
                     },
                 },
             },

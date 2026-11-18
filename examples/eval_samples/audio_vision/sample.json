@@ -1,0 +1,16 @@
+{
+  "task": "audio_vision",
+  "sample_id": "audio-vision-0028",
+  "prompt": "",
+  "reference": "D",
+  "choices": [
+    "left",
+    "right",
+    "up",
+    "down"
+  ],
+  "v1_text": "The dog is looking down at a left-beat bridge.",
+  "v1_audio_text": "",
+  "input_audio": "input_audio.wav",
+  "input_image": "input_image.jpg"
+}

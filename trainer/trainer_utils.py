@@ -62,7 +62,7 @@ def init_distributed_mode():
 
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
-    # 明确绑定 rank 和 PPU，避免 ProcessGroup 猜测设备并输出警告。
+    # 明确绑定 rank 和 GPU，避免 ProcessGroup 猜测设备并输出警告。
     dist.init_process_group(
         backend="nccl",
         device_id=torch.device("cuda", local_rank),
@@ -110,10 +110,13 @@ def load_omni_tokenizer(tokenizer_path):
         # 151669; the two new boundaries consume subsequent reserved rows.
         '<|audio_pad|>', '<|audio_start|>', '<|audio_end|>',
     ]
-    tokenizer.add_special_tokens(
-        {'additional_special_tokens': required_special_tokens},
-        replace_additional_special_tokens=False,
-    )
+    special_token_kwargs = {'additional_special_tokens': required_special_tokens}
+    # Transformers renamed this keyword in newer releases. Keep the loader
+    # usable on both the local image and the 16-card GPU image.
+    try:
+        tokenizer.add_special_tokens(special_token_kwargs, replace_extra_special_tokens=False)
+    except TypeError:
+        tokenizer.add_special_tokens(special_token_kwargs, replace_additional_special_tokens=False)
     audio_ids = tokenizer.encode('<|audio_pad|>', add_special_tokens=False)
     image_ids = tokenizer.encode('<|image_pad|>', add_special_tokens=False)
     for token in required_special_tokens:
@@ -285,6 +288,7 @@ def omni_checkpoint(omni_config, weight='miniqwen_omni', model=None, optimizer=N
             if not name.startswith(('audio_encoder.', 'vision_encoder.'))
         }
         raw_model.save_pretrained(tmp_dir, state_dict=core_state, safe_serialization=True)
+        del core_state
         encoder_sidecars = []
         if getattr(raw_model, '_persist_audio_encoder', False):
             save_safetensors_model(
@@ -308,6 +312,15 @@ def omni_checkpoint(omni_config, weight='miniqwen_omni', model=None, optimizer=N
             else:
                 swanlab_id = getattr(swanlab, 'id', None)
         
+        # Optimizer moments are large (several GiB for the full Thinker).  Do
+        # not put them in the same pickle as model metadata: torch.save would
+        # retain model tensors, optimizer tensors, and the pickle buffer at
+        # once and can exceed the host memory limit during a checkpoint save.
+        optimizer_file = None
+        if save_optimizer_state and optimizer is not None:
+            optimizer_file = 'optimizer.pt'
+            torch.save(optimizer.state_dict(), os.path.join(tmp_dir, optimizer_file))
+
         resume_data = {
             'epoch': epoch,
             'step': step,
@@ -321,8 +334,8 @@ def omni_checkpoint(omni_config, weight='miniqwen_omni', model=None, optimizer=N
                 'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             }
         }
-        if save_optimizer_state and optimizer is not None:
-            resume_data['optimizer'] = optimizer.state_dict()
+        if optimizer_file:
+            resume_data['optimizer_file'] = optimizer_file
         for key, value in kwargs.items():
             if value is not None:
                 if hasattr(value, 'state_dict'):
@@ -354,6 +367,11 @@ def omni_checkpoint(omni_config, weight='miniqwen_omni', model=None, optimizer=N
                 map_location='cpu',
                 weights_only=False,
             )
+            optimizer_file = ckp_data.get('optimizer_file')
+            if optimizer_file and 'optimizer' not in ckp_data:
+                optimizer_path = os.path.join(checkpoint_dir, optimizer_file)
+                if os.path.isfile(optimizer_path):
+                    ckp_data['optimizer'] = torch.load(optimizer_path, map_location='cpu', weights_only=False)
             ckp_data['checkpoint_dir'] = checkpoint_dir
             saved_ws = ckp_data.get('world_size', 1)
             current_ws = dist.get_world_size() if dist.is_initialized() else 1

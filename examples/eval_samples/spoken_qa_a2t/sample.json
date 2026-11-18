@@ -1,0 +1,15 @@
+{
+  "task": "spoken_qa_a2t",
+  "sample_id": "spoken-a2t-0003",
+  "prompt": "",
+  "reference": "A",
+  "choices": [
+    "Its kinetic energy is increasing",
+    "Its kinetic energy is decreasing.",
+    "Its potential energy is increasing.",
+    "Its potential energy is decreasing."
+  ],
+  "v1_text": "A",
+  "v1_audio_text": "",
+  "input_audio": "input_audio.wav"
+}

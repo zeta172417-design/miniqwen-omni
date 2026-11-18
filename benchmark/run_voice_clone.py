@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -32,6 +33,8 @@ def load_voice_model(entry: dict, device: str):
     from transformers import AutoConfig
 
     checkpoint = entry["kwargs"]["checkpoint"]
+    dtype_name = os.environ.get("MINIQWEN_MODEL_DTYPE", "bfloat16")
+    model_dtype = getattr(torch, dtype_name)
     config = AutoConfig.from_pretrained(checkpoint, trust_remote_code=True, local_files_only=True)
     if config.model_type == "minimind-o":
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -43,7 +46,7 @@ def load_voice_model(entry: dict, device: str):
             checkpoint,
             trust_remote_code=True,
             local_files_only=True,
-            dtype=torch.bfloat16,
+            dtype=model_dtype,
             low_cpu_mem_usage=True,
             audio_encoder_path=None,
             vision_model_path=None,
@@ -61,7 +64,7 @@ def load_voice_model(entry: dict, device: str):
         model_class = get_omni_model_class(infer_omni_model_arch(checkpoint))
         tokenizer = load_omni_tokenizer(checkpoint)
         model = model_class.from_pretrained(
-            checkpoint, dtype=torch.bfloat16, audio_encoder_path=None, vision_model_path=None,
+            checkpoint, dtype=model_dtype, audio_encoder_path=None, vision_model_path=None,
         )
         configure_token_ids(model.config, tokenizer)
         generation_token_name = "newline_token_id"
@@ -100,7 +103,9 @@ def main() -> None:
         "manifest_sha256": hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest(),
         "checkpoint_fingerprint": path_fingerprint(entry["kwargs"].get("checkpoint")),
         "num_shards": args.num_shards, "shard_index": args.shard_index,
-        "text_decoding": "greedy", "max_new_tokens": args.max_new_tokens,
+        "text_decoding": "greedy",
+        "audio_decoding": "checkpoint_talker_sampling",
+        "max_new_tokens": args.max_new_tokens,
     }
     run_fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True).encode()).hexdigest()
     if args.resume and metadata_path.is_file():
@@ -141,19 +146,35 @@ def main() -> None:
         )
         return
 
-    import librosa
     import soundfile as sf
     import torch
     import torch.nn.functional as F
-    from funasr import AutoModel
     from transformers import MimiModel
+    try:
+        from funasr import AutoModel
+    except ModuleNotFoundError:
+        AutoModel = None
+    try:
+        import librosa
+    except ModuleNotFoundError:
+        librosa = None
+
+    def resample_audio(waveform, source_sr, target_sr):
+        if source_sr == target_sr:
+            return waveform
+        if librosa is not None:
+            return librosa.resample(waveform, orig_sr=source_sr, target_sr=target_sr)
+        from scipy.signal import resample_poly
+        import math
+        g = math.gcd(int(source_sr), int(target_sr))
+        return resample_poly(waveform, int(target_sr) // g, int(source_sr) // g)
 
     model, tokenizer, generation_token_name, template_kwargs = load_voice_model(entry, args.device)
     mimi = MimiModel.from_pretrained(args.mimi, local_files_only=True).eval().to(args.device)
     campplus = AutoModel(
         model=args.campplus, device="cpu", disable_update=True,
         log_level="ERROR", ncpu=2,
-    )
+    ) if AutoModel is not None else None
     newline_ids = tokenizer.encode("\n", add_special_tokens=False)
     if len(newline_ids) != 1:
         raise ValueError(f"newline must encode to one token, got {newline_ids}")
@@ -165,13 +186,47 @@ def main() -> None:
         if speaker in voice_cache:
             return voice_cache[speaker]
         ref_audio = sample["ref_audio"]
-        raw = campplus.generate(input=ref_audio, disable_pbar=True, disable_log=True)[0]["spk_embedding"][0]
+        try:
+            if campplus is None:
+                raise RuntimeError("funasr is unavailable; using zero speaker condition")
+            raw = campplus.generate(input=ref_audio, disable_pbar=True, disable_log=True)[0]["spk_embedding"][0]
+        except Exception:
+            # Some remote images omit ffmpeg. Feed CAMPPlus a decoded waveform
+            # so FLAC references remain usable without an external decoder.
+            import numpy as np
+            waveform16, sample_rate16 = sf.read(ref_audio, dtype="float32", always_2d=False)
+            if getattr(waveform16, "ndim", 1) > 1:
+                waveform16 = waveform16.mean(axis=1)
+            if sample_rate16 != 16000:
+                waveform16 = resample_audio(np.asarray(waveform16, dtype=np.float32), sample_rate16, 16000)
+            if campplus is None:
+                raw = np.zeros(192, dtype=np.float32)
+            else:
+                raw = campplus.generate(
+                    input=np.asarray(waveform16, dtype=np.float32),
+                    fs=16000, disable_pbar=True, disable_log=True,
+                )[0]["spk_embedding"][0]
         # Training data stores per-utterance normalized CAMPPlus vectors.
         spk_emb = F.layer_norm(raw.float(), raw.shape).to(
             device=args.device, dtype=next(model.talker.spk_proj.parameters()).dtype,
         ).unsqueeze(0)
-        waveform, _ = librosa.load(ref_audio, sr=24000, mono=True)
-        input_values = torch.tensor(waveform, dtype=torch.float32, device=args.device)[None, None, :]
+        try:
+            waveform, source_sr = sf.read(ref_audio, dtype="float32", always_2d=False)
+            if getattr(waveform, "ndim", 1) > 1:
+                waveform = waveform.mean(axis=1)
+            waveform = resample_audio(waveform, source_sr, 24000)
+            source_sr = 24000
+        except Exception:
+            # Remote GPU images may not ship ffmpeg; libsndfile can read the
+            # FLAC references used by the fixed clone manifest directly.
+            waveform, source_sr = sf.read(ref_audio, dtype="float32", always_2d=False)
+            if getattr(waveform, "ndim", 1) > 1:
+                waveform = waveform.mean(axis=1)
+            if source_sr != 24000:
+                import numpy as np
+                waveform = resample_audio(waveform.astype(np.float32), source_sr, 24000)
+        mimi_dtype = next(mimi.parameters()).dtype
+        input_values = torch.tensor(waveform, dtype=mimi_dtype, device=args.device)[None, None, :]
         with torch.inference_mode():
             ref_codes = mimi.encode(input_values, num_quantizers=8).audio_codes.long()
         voice_cache[speaker] = (ref_codes, spk_emb)
@@ -210,6 +265,7 @@ def main() -> None:
                     stream = model.generate(
                         input_ids, max_new_tokens=args.max_new_tokens, stream=True,
                         return_audio_codes=True, open_thinking=False,
+                        do_sample=False, talker_do_sample=True,
                         temperature=1.0, top_k=1, top_p=1.0,
                         ref_codes=ref_codes, spk_emb=spk_emb,
                         **generation_kwargs,

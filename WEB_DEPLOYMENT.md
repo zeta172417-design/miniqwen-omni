@@ -1,6 +1,6 @@
 # MiniQwen-Omni Web 部署
 
-Web 应用支持文本、麦克风/音频、单张图片、多轮上下文、流式文本、Mimi 语音回复和预设音色。它会同时加载 V0.1（Main codec + Code Predictor）与 V0（原并行 8-code Talker），页面顶部可直接切换；切换时会清空上下文，避免两个模型共用历史。推理请求在一张 PPU 上串行执行，其他用户进入最多 8 个请求的队列，避免并发导致显存峰值或缓存串扰。
+Web 应用支持文本、麦克风/音频、单张图片、多轮上下文、流式文本、Mimi 语音回复和预设音色。它会同时加载 MiniQwen-Omni-V1（SFT）与 MiniQwen-Omni-V1-Base（Pretrain），页面顶部可直接切换；切换时会清空上下文，避免两个模型共用历史。推理请求在一张 GPU 上串行执行，其他用户进入最多 8 个请求的队列，避免并发导致显存峰值或缓存串扰。
 
 界面分为“文字 / 图片”和“语音”两个输入页，二者互不依赖。回复形式显示在输入区上方；“仅文字（更快）”会完全跳过 Talker，“文字 + 语音”会同时生成文字和音频。语音可以单独发送：进入“语音”页 → 开始录音 → 停止并等待波形出现 → 点击“发送这段语音”。浏览器通常会阻止未由用户手势触发的自动播放，看到回复后可手动点击播放器的 ▶。
 
@@ -22,13 +22,13 @@ bash scripts/serve_web.sh
 
 默认使用：
 
-- PPU `0`；
-- V0.1：`out/miniqwen_omni_full_main_codec_cp_v5/checkpoint`；
-- V0：`out/miniqwen_omni_full/checkpoint`；
+- GPU `0`；
+- MiniQwen-Omni-V1：`out/miniqwen_sft/last/checkpoint`；
+- MiniQwen-Omni-V1-Base：`out/miniqwen_pretrain/tts/last/checkpoint`；
 - BF16 核心权重；
 - `0.0.0.0:7860`；
 - 用户名 `miniqwen`，密码来自 `MINIQWEN_WEB_PASSWORD`；
-- ASR 展示模型放在 CPU，避免与主模型争用 PPU。
+- ASR 展示模型放在 CPU，避免与主模型争用 GPU。
 
 看到 `Running on local URL: http://0.0.0.0:7860` 后，按 `Ctrl-b`、再按 `d` 退出 tmux。关闭本地电脑不影响服务；只要 DSW 实例和 tmux 进程仍在运行，模型就会继续提供服务。
 
@@ -99,11 +99,11 @@ bash scripts/serve_cpolar.sh
 所有敏感信息保留在环境变量中，以下变量不会写入 checkpoint：
 
 ```bash
-# 分别覆盖 V0.1 与 V0 checkpoint
+# 分别覆盖 MiniQwen-Omni-V1 与 MiniQwen-Omni-V1-Base checkpoint
 export MINIQWEN_MODEL_PATH=/path/to/miniqwen-omni-bf16
-export MINIQWEN_V0_MODEL_PATH=/path/to/miniqwen-omni-v0-bf16
+export MINIQWEN_BASE_MODEL_PATH=/path/to/MiniQwen-Omni-V1-Base
 
-# 改端口或选择另一张物理 PPU
+# 改端口或选择另一张物理 GPU
 export MINIQWEN_WEB_PORT=9000
 export CUDA_VISIBLE_DEVICES=1
 
@@ -128,11 +128,11 @@ bash scripts/serve_web.sh --max-upload-mb 30
 curl -I http://127.0.0.1:7860
 ```
 
-未登录时出现重定向或未授权响应是正常的。查看进程和 PPU：
+未登录时出现重定向或未授权响应是正常的。查看进程和 GPU：
 
 ```bash
 ps -ef | grep '[w]eb_demo_omni.py'
-/usr/local/PPU_SDK/ppu-smi/bin/ppu-smi
+/usr/local/GPU_SDK/gpu-smi/bin/gpu-smi
 ```
 
 推荐依次验证：纯文本、文本语音回复、语音输入、图片输入、多轮对话。当前实现是“文本逐 token 流式显示，音频 codes 生成完成后再由 Mimi 一次解码”，并非全双工通话。

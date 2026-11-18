@@ -1,0 +1,11 @@
+{
+  "scorer": "SpeechMOS/UTMOS22 strong",
+  "manifest": "omni-core-v2.3-standard",
+  "samples_per_model": 64,
+  "utmos_mean": {
+    "MiniQwen-Omni-V1": 3.2842,
+    "Mini-Omni2": 4.3861,
+    "MiniMind-3O-MoE": 3.6376,
+    "Qwen2.5-Omni-3B": 4.2909
+  }
+}

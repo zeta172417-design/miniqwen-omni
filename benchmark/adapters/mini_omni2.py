@@ -94,7 +94,7 @@ class MiniOmni2Adapter(ModelAdapter):
                 sample.sample_id, self.model_id, status="unsupported",
                 error="Mini-Omni2 public inference does not support multi-image input",
             )
-        if sample.task == "text_regression" or (sample.image_paths and not sample.audio):
+        if sample.image_paths and not sample.audio:
             return GenerationResult(
                 sample.sample_id, self.model_id, status="unsupported",
                 error="Mini-Omni2 public API has no text-only vision/text response path",

@@ -1,0 +1,14 @@
+{
+  "task": "multi_image",
+  "sample_id": "multi-image-0000",
+  "prompt": "All the crabs are out of the water.\nA. True\nB. False\nAnswer with only the option letter.",
+  "reference": "A",
+  "choices": [
+    "True",
+    "False"
+  ],
+  "v1_text": "A",
+  "v1_audio_text": "",
+  "input_image_0": "input_image_0.jpg",
+  "input_image_1": "input_image_1.jpg"
+}

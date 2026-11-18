@@ -33,7 +33,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--manifest", required=True)
-    parser.add_argument("--models", default="miniqwen-v0,miniqwen-v0.1,minimind-3o-moe")
+    parser.add_argument("--models", default="miniqwen-v1-base,miniqwen-v1,minimind-3o-moe")
     parser.add_argument("--asr", default=str(PROJECT_ROOT / "model/SenseVoiceSmall"))
     parser.add_argument("--speaker-model", default=str(PROJECT_ROOT / "model/eres2net_sv_en_voxceleb_16k"))
     parser.add_argument("--device", default="cuda:0")
@@ -149,10 +149,10 @@ def main() -> None:
         }
         scored_by_model[model_id] = {row["sample_id"]: row for row in scored}
 
-    if "miniqwen-v0" in scored_by_model and "miniqwen-v0.1" in scored_by_model:
-        left, right = scored_by_model["miniqwen-v0"], scored_by_model["miniqwen-v0.1"]
+    if "miniqwen-v1-base" in scored_by_model and "miniqwen-v1" in scored_by_model:
+        left, right = scored_by_model["miniqwen-v1-base"], scored_by_model["miniqwen-v1"]
         common = sorted(left.keys() & right.keys())
-        summary["v01_minus_v0"] = {
+        summary["v1_minus_base"] = {
             "speaker_similarity": stat([
                 right[key]["speaker_similarity"] - left[key]["speaker_similarity"] for key in common
             ]),

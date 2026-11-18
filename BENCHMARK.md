@@ -13,41 +13,39 @@ strict format compliance remains visible as a diagnostic. TextVQA retains the
 annotation-consensus rule while allowing a normalized reference answer as a
 complete token span in a brief explanation.
 
+## Runtime
+
+For full runs, an 8× NVIDIA H20 (96 GB) machine with CUDA 12.4 or a compatible runtime is recommended. The benchmark uses CUDA data parallelism; smaller GPU counts can be selected with `OMNI_BENCH_DEVICES`.
+
 ## Capability set
 
-The standard profile contains 752 main samples plus 16 reference voice-cloning
-samples. The quick profile contains 110 main samples plus 8 cloning samples.
+The standard profile contains 640 main samples plus 16 reference voice-cloning
+samples. The quick profile contains 92 main samples plus 8 cloning samples.
 
-The frozen first official result is summarized in
-[`benchmark/reports/OMNI_BENCHMARK_V0.md`](benchmark/reports/OMNI_BENCHMARK_V0.md).
-MiniQwen V0.1 is the architecture baseline for subsequent data and training
-pipeline improvements; MiniQwen V0 remains the historical parallel-delay
-comparison model.
+The benchmark runner and its manifests are the reproducible evaluation entry points.
+The published README reports the current MiniQwen-Omni-V1 comparison results.
 
 | Task | Standard | Input → output | Primary diagnostics |
 |---|---:|---|---|
 | LibriSpeech test-clean/test-other ASR | 160 | audio → text | WER |
 | Spoken QA A2T | 80 | audio → text | answer accuracy |
-| Spoken QA A2A | 80 | audio → text + audio | spoken-answer accuracy, text/speech consistency |
 | TTS | 64 | text → audio | ASR-WER, UTMOS, validity |
 | MMBench-EN | 120 | image + text → text | accuracy |
 | POPE | 60 | image + text → text | F1 and accuracy |
 | TextVQA | 60 | image + text → text | VQA score |
 | Image + spoken question | 64 | image + audio → text | paired accuracy |
 | NLVR2 | 32 | two images + text → text | accuracy |
-| Text regression guard | 32 | text → text | accuracy, excluded from Omni score |
 | Voice clone | 16 | reference audio + text → audio | speaker cosine, 1-WER, UTMOS |
 
 Every manifest row declares `output_modality` and `require_audio`. ASR, image
-understanding, audio-vision understanding, multi-image, and text-regression rows
-never start Talker. Only A2A, TTS, and voice cloning generate speech.
+understanding, audio-vision understanding, and multi-image rows never start Talker.
+Only TTS and voice cloning generate speech.
 
 Unsupported public APIs remain `N/A` in task diagnostics, but count as zero in
 the headline Fixed Omni score. Mini-Omni2's public API, for example, does not
 expose text-question image inference or multi-image input. The secondary Common
-Task score averages the exact non-text tasks completed by every model in the
-same report, so unlike a capability-name intersection it compares like with
-like.
+Task score averages the exact tasks completed by every model in the same report,
+so unlike a capability-name intersection it compares like with like.
 
 ## Prepare data
 
@@ -55,7 +53,7 @@ The runner automatically prepares a missing manifest. To prepare explicitly:
 
 ```bash
 cd /mnt/workspace/zhaozetao/multimodel/miniqwen-omni
-source envs/Omni-ppu/bin/activate
+source .venv/bin/activate
 
 python benchmark/prepare_data.py \
   --config benchmark/configs/quick.json \
@@ -88,14 +86,14 @@ HF_ENDPOINT=https://hf-mirror.com hf download lmms-lab-encoder/textvqa \
 Quick architecture comparison:
 
 ```bash
-source envs/Omni-ppu/bin/activate
+source .venv/bin/activate
 bash scripts/run_omni_benchmark.sh quick
 ```
 
 Formal comparison:
 
 ```bash
-source envs/Omni-ppu/bin/activate
+source .venv/bin/activate
 bash scripts/run_omni_benchmark.sh standard
 ```
 
@@ -108,7 +106,7 @@ bash scripts/run_omni_benchmark.sh quick
 ```
 
 Evaluation is data parallel: each process owns a complete model and a disjoint
-manifest shard. No model weights are split across PPUs. MiniQwen V0.1 uses
+manifest shard. No model weights are split across GPUs. MiniQwen V0.1 uses
 native batch 4 by default; adapters without safe batching use batch 1. Runs are
 resumable with the same `OMNI_BENCH_RUN_ID`. Resume is rejected if the manifest,
 checkpoint, adapter, seed, shard layout, batch size, or decoding mode changed.
@@ -117,7 +115,7 @@ level. Qwen2.5-Omni audio generation uses its model-card-required system prompt
 and a label-independent Talker safety cap; natural-label duration is never fed
 to model inference.
 
-The same SenseVoice checkpoint scores generated speech on PPU. Set
+The same SenseVoice checkpoint scores generated speech on GPU. Set
 `OMNI_BENCH_ASR_DEVICE=cpu` only for fallback. UTMOS predicts naturalness MOS
 on a roughly 1–5 scale and is enabled by default from the shared SpeechMOS
 checkout. ASR-WER measures content, speaker cosine measures voice identity,

@@ -58,6 +58,7 @@ def eval_sample(model, tokenizer, args, idx, prompt, audio_inputs, output_name, 
         res_y = model.generate(x, max_new_tokens=args.max_new_tokens,
                                temperature=args.temperature, top_p=args.top_p, stream=True,
                                top_k=args.top_k, return_audio_codes=True, open_thinking=bool(args.open_thinking),
+                               do_sample=False, talker_do_sample=True,
                                newline_token_id=newline_ids[0], pad_token_id=tokenizer.pad_token_id,
                                audio_inputs=audio_inputs, audio_lens=audio_lens, pixel_values=pixel_values,
                                ref_codes=ref_codes, spk_emb=spk_emb)
@@ -114,8 +115,8 @@ def main():
     parser.add_argument('--top_k', default=None, type=int, help="top-k；默认读取generation_config")
     parser.add_argument('--output_dir', default=project_path('output_audio'), type=str, help="输出音频保存目录")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
-    parser.add_argument('--audio_dir', default=project_path('dataset', 'eval_omni'), type=str, help="测试音频目录")
-    parser.add_argument('--image_dir', default=project_path('dataset', 'eval_omni'), type=str, help="测试图像目录")
+    parser.add_argument('--audio_dir', default=project_path('dataset', 'raw', 'evaluation_assets', 'eval_omni'), type=str, help="测试音频目录")
+    parser.add_argument('--image_dir', default=project_path('dataset', 'raw', 'evaluation_assets', 'eval_omni'), type=str, help="测试图像目录")
     parser.add_argument('--open_thinking', default=0, type=int, choices=[0, 1], help="是否开启思考模式；开启时音频等待</think>后开始")
     parser.add_argument('--decode_audio', default=1, type=int, help="是否解码音频输出（0=否，1=是）")
     parser.add_argument('--mode', default='0', type=str, help="评估模式：-1=all 0=text 1=multi 2=audio 3=clone 4=image 5=mix（逗号组合，如 2,5）")

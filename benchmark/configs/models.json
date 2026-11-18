@@ -1,20 +1,26 @@
 {
-  "run_id": "omni-benchmark-v0-standard",
+  "run_id": "miniqwen-omni-v1-standard",
   "manifest": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-data/omni-core-v2.3-standard/manifest.jsonl",
   "output_root": "/mnt/workspace/zhaozetao/multimodel/Omni/benchmark-results",
   "seed": 20260913,
   "tasks": [
-    "asr_clean", "asr_other", "spoken_qa_a2t", "spoken_qa_a2a", "tts",
-    "vision_mmbench", "vision_pope", "vision_textvqa", "audio_vision",
-    "multi_image", "text_regression"
+    "asr_clean",
+    "asr_other",
+    "spoken_qa_a2t",
+    "tts",
+    "vision_mmbench",
+    "vision_pope",
+    "vision_textvqa",
+    "audio_vision",
+    "multi_image"
   ],
   "models": [
     {
-      "id": "miniqwen-v0",
-      "role": "0.6B parallel-delay baseline",
+      "id": "miniqwen-v1-base",
+      "role": "0.6B pretrain base",
       "adapter": "benchmark.adapters.miniqwen:MiniQwenAdapter",
       "kwargs": {
-        "checkpoint": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/out/miniqwen_omni_full/checkpoint",
+        "checkpoint": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/out/miniqwen_pretrain/tts/last/checkpoint",
         "audio_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/SenseVoiceSmall",
         "vision_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/siglip2-base-p32-256-ve",
         "mimi": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/mimi",
@@ -23,11 +29,11 @@
       }
     },
     {
-      "id": "miniqwen-v0.1",
-      "role": "0.6B primary",
+      "id": "miniqwen-v1",
+      "role": "0.6B SFT model",
       "adapter": "benchmark.adapters.miniqwen:MiniQwenAdapter",
       "kwargs": {
-        "checkpoint": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/out/miniqwen_omni_full_main_codec_cp_v5/checkpoint",
+        "checkpoint": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/out/miniqwen_sft/last/checkpoint",
         "audio_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/SenseVoiceSmall",
         "vision_encoder": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/siglip2-base-p32-256-ve",
         "mimi": "/mnt/workspace/zhaozetao/multimodel/miniqwen-omni/model/mimi",

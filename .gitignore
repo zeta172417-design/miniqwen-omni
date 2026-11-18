@@ -22,6 +22,12 @@ envs/
 
 # Training data and dataset caches
 dataset/*.parquet
+dataset/raw/
+dataset/sft/
+dataset/pretrain/
+dataset/pretrain_clean360/
+dataset/pretrain_v2/
+dataset/pretrain_audit/
 dataset/arch_eval/
 dataset/arch_eval_holdout/
 dataset/eval_omni/
@@ -42,8 +48,12 @@ releases/
 *.ckpt
 *.onnx
 
-# Runtime output and experiment tracking
 .runtime/
+reports/
+benchmark-data/
+benchmark-results/
+
+# Runtime output and experiment tracking
 trainer/swanlog/
 swanlog/
 output_audio/
@@ -51,3 +61,11 @@ output_audio/
 
 # ModelScope resumable-upload metadata
 .ms_upload_cache/
+# README playback examples are intentionally tracked
+!examples/
+!examples/audio/
+!examples/audio/*.wav
+!examples/images/
+!examples/images/*.jpg
+!examples/images/*.png
+!examples/images/*.webp

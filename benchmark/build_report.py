@@ -29,7 +29,6 @@ LABELS = {
     "asr_clean": "ASR test-clean",
     "asr_other": "ASR test-other",
     "spoken_qa_a2t": "Spoken QA: audio to text",
-    "spoken_qa_a2a": "Spoken QA: audio to audio",
     "tts": "Text to speech",
     "vision_mmbench": "MMBench-EN",
     "vision_pope": "POPE hallucination",
@@ -168,11 +167,6 @@ def main():
                     f"F1 {value['f1']*100:.2f}% / Acc {value['accuracy']*100:.2f}%"
                     + choice_diagnostics(value)
                 )
-            elif task == "spoken_qa_a2a" and value.get("text_answer_score") is not None:
-                cells.append(
-                    f"Spoken {value['score']*100:.2f}% / text {value['text_answer_score']*100:.2f}%"
-                    + choice_diagnostics(value)
-                )
             elif "paired_degradation" in value:
                 cells.append(
                     f"{value['score']*100:.2f}% / paired drop {value['paired_degradation']*100:+.2f}"
@@ -185,7 +179,7 @@ def main():
         lines.append(f"| {LABELS.get(task, task)} | " + " | ".join(cells) + " |")
     by_model = {name: rows for name, _, rows in models}
     comparisons = [
-        ("miniqwen-v0", "miniqwen-v0.1", "V0.1 minus V0"),
+        ("miniqwen-v1-base", "miniqwen-v1", "V1 minus V1-Base"),
     ]
     comparison_lines = []
     for left_name, right_name, label in comparisons:
@@ -261,15 +255,15 @@ def main():
                 f"{values['audio_valid_rate']*100:.2f} | "
                 f"{values['mean_latency_seconds']:.2f} |"
             )
-        comparison = clone_summary.get("v01_minus_v0")
+        comparison = clone_summary.get("v1_minus_base")
         if comparison:
             sim_delta = comparison["speaker_similarity"]
             content_delta = comparison["content_score"]
             lines += [
                 "",
-                f"- V0.1−V0 paired speaker-cosine difference: **{sim_delta['mean']:+.4f}** "
+                f"- V1−V1-Base paired speaker-cosine difference: **{sim_delta['mean']:+.4f}** "
                 f"(95% CI [{sim_delta['ci95'][0]:+.4f}, {sim_delta['ci95'][1]:+.4f}]).",
-                f"- V0.1−V0 paired content difference: **{content_delta['mean']*100:+.2f} points** "
+                f"- V1−V1-Base paired content difference: **{content_delta['mean']*100:+.2f} points** "
                 f"(95% CI [{content_delta['ci95'][0]*100:+.2f}, {content_delta['ci95'][1]*100:+.2f}]).",
             ]
 

@@ -1,11 +1,12 @@
-"""Production V0.1 MiniQwen-Omni architecture.
+"""MiniQwen-Omni V1 architecture.
 
 Main codec + two-layer Code Predictor with mean fusion of the previous complete
-eight-code Mimi frame. Keep this file checkpoint-compatible with the 16-PPU
+eight-code Mimi frame. Keep this file checkpoint-compatible with the 16-GPU
 full-dataset run.
 """
 
 import os, math, torch, soundfile as sf, librosa, warnings, numpy as np, onnxruntime as ort, logging, contextlib, io
+import inspect
 from dataclasses import dataclass
 from types import SimpleNamespace
 from torch import nn
@@ -16,6 +17,7 @@ from transformers.cache_utils import DynamicCache
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 from .model_talker import TalkerBlock, TalkerConfig, TalkerMoEFeedForward, TalkerRMSNorm, precompute_freqs_cis
+from .voice_conditioning import CONDITION_PREFIX_LENGTH
 
 
 class OmniConfig(Qwen3Config):
@@ -23,6 +25,10 @@ class OmniConfig(Qwen3Config):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model_type = "miniqwen-omni"
+        # Transformers 4.57 stores Qwen3 RoPE settings in rope_parameters.
+        # Keep the scalar attribute available to the Talker and Code Predictor.
+        rope_parameters = kwargs.get("rope_parameters") or {}
+        self.rope_theta = kwargs.get("rope_theta", rope_parameters.get("rope_theta", 10000.0))
         self.num_talker_hidden_layers = kwargs.get("num_talker_hidden_layers", 6)
         self.talker_hidden_size = kwargs.get("talker_hidden_size", 768)
         self.use_moe = kwargs.get("use_moe", False)
@@ -42,6 +48,7 @@ class OmniConfig(Qwen3Config):
         self.audio_ref_start_token = kwargs.get("audio_ref_start_token", 2052)
         self.audio_ref_end_token = kwargs.get("audio_ref_end_token", 2053)
         self.use_talker_ref_boundaries = kwargs.get("use_talker_ref_boundaries", False)
+        self.talker_condition_prefix_length = kwargs.get('talker_condition_prefix_length', CONDITION_PREFIX_LENGTH)
         self.spk_emb_size = kwargs.get("spk_emb_size", 192)
         self.think_end_ids = kwargs.get("think_end_ids", [])
         self.image_ids = kwargs.get("image_ids", [])
@@ -72,12 +79,15 @@ class OmniConfig(Qwen3Config):
         self.code_predictor_num_key_value_heads = kwargs.get("code_predictor_num_key_value_heads", 4)
         self.code_predictor_intermediate_size = kwargs.get("code_predictor_intermediate_size", 2432)
         self.residual_codec_loss_weight = kwargs.get("residual_codec_loss_weight", 0.3)
-        self.main_codec_temperature = kwargs.get("main_codec_temperature", 0.2)
+        # Match Qwen-Omni Talker decoding: stochastic main-code sampling,
+        # while keeping text generation independently configurable.
+        self.main_codec_temperature = kwargs.get("main_codec_temperature", 0.9)
         self.main_codec_top_k = kwargs.get("main_codec_top_k", 50)
-        self.main_codec_top_p = kwargs.get("main_codec_top_p", 0.8)
+        self.main_codec_top_p = kwargs.get("main_codec_top_p", 1.0)
         self.residual_codec_temperature = kwargs.get("residual_codec_temperature", 1.0)
         self.residual_codec_top_k = kwargs.get("residual_codec_top_k", 50)
         self.residual_codec_top_p = kwargs.get("residual_codec_top_p", 0.8)
+        self.talker_repetition_penalty = kwargs.get("talker_repetition_penalty", 1.05)
 
     @classmethod
     def from_qwen_pretrained(cls, pretrained_path, **overrides):
@@ -208,6 +218,10 @@ class MimiCodecEmbedding(nn.Module):
                 for index, embedding in enumerate(self.residual)
             )
             output[normal] = torch.stack(frame_embeddings, dim=0).mean(dim=0)
+        else:
+            # Mixed SFT can leave one rank with only special/padding codes.
+            # Keep residual embeddings in that rank's graph for DDP reduction.
+            output = output + sum(embedding.weight.sum() for embedding in self.residual) * 0
         return output
 
 
@@ -230,6 +244,10 @@ class CodePredictor(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             rope_theta=config.rope_theta,
             rope_scaling=None,
+            # The GPU backend currently returns NaNs from SDPA for the
+            # predictor's short causal sequence. Use the explicit attention
+            # path; the main Talker can still use SDPA.
+            flash_attn=False,
             use_moe=False,
         )
         # The same eight embeddings are used for temporal frame feedback and
@@ -287,7 +305,8 @@ class CodePredictor(nn.Module):
         return [self.heads[index](hidden_states[:, index + 1]) for index in range(7)]
 
     @torch.inference_mode()
-    def generate(self, talker_hidden, first_code, sample_fn, temperature=1.0, top_k=50, top_p=0.8):
+    def generate(self, talker_hidden, first_code, sample_fn, temperature=1.0, top_k=50, top_p=0.8,
+                 repetition_penalty=1.0, do_sample=True):
         batch_size = talker_hidden.size(0)
         first_code = first_code.reshape(-1)
         if first_code.numel() != batch_size:
@@ -302,7 +321,8 @@ class CodePredictor(nn.Module):
         for index in range(7):
             logits = self.heads[index](current)
             code = torch.tensor(
-                [sample_fn(logits[row], temperature, top_k, top_p) for row in range(batch_size)],
+                [sample_fn(logits[row], temperature, top_k, top_p, do_sample=do_sample)
+                 for row in range(batch_size)],
                 dtype=torch.long,
                 device=talker_hidden.device,
             )
@@ -336,13 +356,19 @@ class SenseVoiceAudioProcessor:
 class TalkerModule(nn.Module):
     def __init__(self, config):
         super().__init__()
+        rope_theta = getattr(config, "rope_theta", None)
+        if rope_theta is None:
+            rope_parameters = getattr(config, "rope_parameters", None) or {}
+            rope_theta = rope_parameters.get("rope_theta", 1000000.0)
+            # Older local modules (CodePredictor) still read the legacy field.
+            config.rope_theta = rope_theta
         self.talker_config = TalkerConfig(
             hidden_size=config.talker_hidden_size,
             use_moe=config.use_moe,
             max_position_embeddings=config.max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
-            rope_theta=config.rope_theta,
-            rope_scaling=config.rope_scaling,
+            rope_theta=rope_theta,
+            rope_scaling=getattr(config, "rope_scaling", None),
         )
         self.layers = nn.ModuleList([TalkerBlock(l, self.talker_config) for l in range(config.num_talker_hidden_layers)])
         self.norm = TalkerRMSNorm(config.talker_hidden_size, eps=config.rms_norm_eps)
@@ -536,7 +562,7 @@ class MiniQwenOmni(Qwen3ForCausalLM):
         if emb.dim() == 2: emb = emb.unsqueeze(0)
         # The frozen SigLIP encoder is intentionally kept in FP32, while
         # inference/evaluation may load the trainable MiniQwen modules in
-        # BF16. PPU LayerNorm requires input and parameter dtypes to match
+        # BF16. GPU LayerNorm requires input and parameter dtypes to match
         # outside autocast, so align explicitly just like the audio projector.
         emb = self.vision_proj(emb.to(dtype=proj_dtype))
         if mask.all(): return emb
@@ -661,6 +687,11 @@ class MiniQwenOmni(Qwen3ForCausalLM):
         if self.config.use_mrope and position_ids is None:
             if start_pos == 0:
                 position_ids, rope_deltas = self.build_mrope_position_ids(text_ids, attention_mask)
+                if attention_mask is not None:
+                    # The builder returns modality compression relative to
+                    # valid tokens; the cache counts physical padding too.
+                    padding = seq_length - attention_mask.long().sum(-1, keepdim=True)
+                    rope_deltas = rope_deltas - padding
             else:
                 if rope_deltas is None:
                     rope_deltas = torch.zeros((batch_size, 1), dtype=torch.long, device=input_ids.device)
@@ -705,12 +736,17 @@ class MiniQwenOmni(Qwen3ForCausalLM):
             )
             mask_kwargs = {
                 "config": self.model.config,
-                "input_embeds": hidden_states,
                 "attention_mask": attention_mask,
-                "cache_position": cache_position,
                 "past_key_values": cache.thinker,
                 "position_ids": cache_position.unsqueeze(0),
             }
+            mask_parameters = inspect.signature(create_causal_mask).parameters
+            if "cache_position" in mask_parameters:
+                mask_kwargs["cache_position"] = cache_position
+            # Transformers 4.57 calls this argument ``input_embeds``;
+            # Transformers 5.x renamed it to ``inputs_embeds``.
+            embed_arg = "inputs_embeds" if "inputs_embeds" in mask_parameters else "input_embeds"
+            mask_kwargs[embed_arg] = hidden_states
             thinker_attention_mask = {
                 "full_attention": create_causal_mask(**mask_kwargs),
             }
@@ -838,22 +874,40 @@ class MiniQwenOmni(Qwen3ForCausalLM):
         return tokens[-1] if tokens else input_ids
 
     @staticmethod
-    def _sample_from_logits(logits, temperature=1.0, top_k=0, top_p=1.0, generator=None):
+    def _sample_from_logits(logits, temperature=1.0, top_k=0, top_p=1.0, generator=None,
+                            repetition_penalty=1.0, history=None, do_sample=True):
         logits = logits.float().clone() / max(float(temperature), 1e-9)
+        if repetition_penalty and repetition_penalty != 1.0 and history:
+            seen = torch.tensor(list(set(history)), dtype=torch.long, device=logits.device)
+            seen = seen[(seen >= 0) & (seen < logits.numel())]
+            scores = logits[seen]
+            logits[seen] = torch.where(scores > 0, scores / repetition_penalty, scores * repetition_penalty)
+        if not do_sample:
+            return int(torch.argmax(logits).item())
         if top_k and top_k > 0:
             candidate_logits, candidate_ids = torch.topk(logits, min(int(top_k), logits.numel()))
             if top_p and top_p < 1.0:
                 mask = torch.cumsum(F.softmax(candidate_logits, dim=-1), dim=-1) > top_p
                 mask[1:], mask[0] = mask[:-1].clone(), False
                 candidate_logits[mask] = -float('inf')
-            sampled = torch.multinomial(F.softmax(candidate_logits, dim=-1), 1, generator=generator)
+            probs = F.softmax(candidate_logits, dim=-1)
+            # Some GPU runtime builds assert inside device-side multinomial.
+            # Keep the same sampling distribution by sampling on CPU only when
+            # explicitly requested; normal CUDA runs remain fully device-side.
+            if os.environ.get("MINIQWEN_CPU_SAMPLER") == "1":
+                sampled = torch.multinomial(probs.cpu(), 1, generator=generator).to(candidate_ids.device)
+            else:
+                sampled = torch.multinomial(probs, 1, generator=generator)
             return int(candidate_ids[sampled].item())
         if top_p and top_p < 1.0:
             sorted_logits, sorted_ids = torch.sort(logits, descending=True)
             mask = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1) > top_p
             mask[1:], mask[0] = mask[:-1].clone(), False
             logits[sorted_ids[mask]] = -float('inf')
-        return int(torch.multinomial(F.softmax(logits, dim=-1), 1, generator=generator).item())
+        probs = F.softmax(logits, dim=-1)
+        if os.environ.get("MINIQWEN_CPU_SAMPLER") == "1":
+            return int(torch.multinomial(probs.cpu(), 1, generator=generator).item())
+        return int(torch.multinomial(probs, 1, generator=generator).item())
 
     @torch.inference_mode()
     def batch_generate(self, input_ids, attention_mask=None, eos_token_id=None,
@@ -885,6 +939,26 @@ class MiniQwenOmni(Qwen3ForCausalLM):
         seeds = list(seeds or [0] * batch_size)
         if len(seeds) != batch_size:
             raise ValueError("seeds must contain one value per sample")
+        audio_sampling_mode = args.pop("audio_sampling_mode", "qwen")
+        thinker_max_new_tokens = int(args.pop("thinker_max_new_tokens", max_new_tokens))
+        talker_max_new_tokens = int(args.pop("talker_max_new_tokens", max_new_tokens))
+        default_penalty = float(os.environ.get(
+            "MINIQWEN_TALKER_REPETITION_PENALTY",
+            getattr(self.config, "talker_repetition_penalty", 1.05),
+        ))
+        talker_repetition_penalty = float(args.pop("talker_repetition_penalty", default_penalty))
+        text_do_sample = bool(args.pop("do_sample", False))
+        talker_do_sample = bool(args.pop("talker_do_sample", True))
+        if audio_sampling_mode == "qwen":
+            main_audio_temperature, main_audio_top_k, main_audio_top_p = 0.9, 50, 1.0
+            residual_audio_temperature, residual_audio_top_k, residual_audio_top_p = 1.0, 50, 0.8
+        else:
+            main_audio_temperature = self.config.main_codec_temperature
+            main_audio_top_k = self.config.main_codec_top_k
+            main_audio_top_p = self.config.main_codec_top_p
+            residual_audio_temperature = self.config.residual_codec_temperature
+            residual_audio_top_k = self.config.residual_codec_top_k
+            residual_audio_top_p = self.config.residual_codec_top_p
         generators = []
         for seed in seeds:
             generator = torch.Generator(device=input_ids.device)
@@ -905,6 +979,7 @@ class MiniQwenOmni(Qwen3ForCausalLM):
         histories = [input_ids[row, attention_mask[row].bool()].tolist() for row in range(batch_size)]
         generated_tokens = [[] for _ in range(batch_size)]
         audio_frames = [[] for _ in range(batch_size)]
+        audio_histories = [[] for _ in range(batch_size)]
         text_finished = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
         audio_finished = torch.full(
             (batch_size,), not bool(return_audio_codes), dtype=torch.bool, device=input_ids.device,
@@ -972,6 +1047,7 @@ class MiniQwenOmni(Qwen3ForCausalLM):
                         logits[seen] = torch.where(scores > 0, scores / rp, scores * rp)
                     token = self._sample_from_logits(
                         logits, temperature, top_k, top_p, generator=generators[row],
+                        do_sample=text_do_sample,
                     )
                     generated_tokens[row].append(token)
                     histories[row].append(token)
@@ -1000,26 +1076,30 @@ class MiniQwenOmni(Qwen3ForCausalLM):
                         masked[self.audio_stop_token] = main_logits[self.audio_stop_token]
                         c0 = self._sample_from_logits(
                             masked,
-                            self.config.main_codec_temperature,
-                            self.config.main_codec_top_k,
-                            self.config.main_codec_top_p,
+                            main_audio_temperature,
+                            main_audio_top_k,
+                            main_audio_top_p,
+                            repetition_penalty=talker_repetition_penalty,
+                            history=audio_histories[row],
                             generator=generators[row],
+                            do_sample=talker_do_sample,
                         )
                         if c0 == self.audio_stop_token:
                             audio_finished[row] = True
                         else:
-                            def sample_residual(logits, residual_temperature, residual_top_k, residual_top_p):
+                            audio_histories[row].append(int(c0))
+                            def sample_residual(logits, residual_temperature, residual_top_k, residual_top_p, **sample_kwargs):
                                 return self._sample_from_logits(
                                     logits, residual_temperature, residual_top_k, residual_top_p,
-                                    generator=generators[row],
+                                    generator=generators[row], do_sample=sample_kwargs.get("do_sample", talker_do_sample),
                                 )
                             frame = self.talker.code_predictor.generate(
                                 out.talker_hidden_states[row:row + 1, -1],
                                 torch.tensor([c0], dtype=torch.long, device=input_ids.device),
                                 sample_residual,
-                                temperature=self.config.residual_codec_temperature,
-                                top_k=self.config.residual_codec_top_k,
-                                top_p=self.config.residual_codec_top_p,
+                                temperature=residual_audio_temperature,
+                                top_k=residual_audio_top_k,
+                                top_p=residual_audio_top_p,
                             )
                             audio_frames[row].append(frame)
                             first_audio_seconds[row] = first_audio_seconds[row] or now - started_at
@@ -1081,6 +1161,33 @@ class MiniQwenOmni(Qwen3ForCausalLM):
     def _stream_generate_main_codec_predictor(self, input_ids, eos_token_id, max_new_tokens,
                                               temperature, top_p, top_k, rp, use_cache,
                                               return_audio_codes=False, **args):
+        audio_sampling_mode = args.pop("audio_sampling_mode", "qwen")
+        thinker_max_new_tokens = int(args.pop("thinker_max_new_tokens", max_new_tokens))
+        talker_max_new_tokens = int(args.pop("talker_max_new_tokens", max_new_tokens))
+        default_penalty = float(os.environ.get(
+            "MINIQWEN_TALKER_REPETITION_PENALTY",
+            getattr(self.config, "talker_repetition_penalty", 1.05),
+        ))
+        talker_repetition_penalty = float(args.pop("talker_repetition_penalty", default_penalty))
+        text_do_sample = bool(args.pop("do_sample", False))
+        talker_do_sample = bool(args.pop("talker_do_sample", True))
+        if audio_sampling_mode == "qwen":
+            main_audio_temperature, main_audio_top_k, main_audio_top_p = 0.9, 50, 1.0
+            residual_audio_temperature, residual_audio_top_k, residual_audio_top_p = 1.0, 50, 0.8
+        else:
+            main_audio_temperature = self.config.main_codec_temperature
+            main_audio_top_k = self.config.main_codec_top_k
+            main_audio_top_p = self.config.main_codec_top_p
+            residual_audio_temperature = self.config.residual_codec_temperature
+            residual_audio_top_k = self.config.residual_codec_top_k
+            residual_audio_top_p = self.config.residual_codec_top_p
+        reserved = int(getattr(self.config, 'talker_condition_prefix_length', 0)) if return_audio_codes and (args.get('ref_codes') is not None or args.get('spk_emb') is not None) else 0
+        if reserved:
+            mask = args.pop('attention_mask', None)
+            if mask is None:
+                mask = torch.ones_like(input_ids)
+            input_ids = F.pad(input_ids, (reserved, 0), value=self.config.pad_token_id)
+            args['attention_mask'] = F.pad(mask, (reserved, 0), value=0)
         start_pos = input_ids.shape[1]
         past_kvs = None
         text_finished = False
@@ -1094,6 +1201,7 @@ class MiniQwenOmni(Qwen3ForCausalLM):
         args.pop('logits_to_keep', None)
 
         audio_buffer = None
+        audio_history = []
         if return_audio_codes:
             audio_buffer = torch.full(
                 (1, 8, start_pos), self.audio_pad_token,
@@ -1101,8 +1209,14 @@ class MiniQwenOmni(Qwen3ForCausalLM):
             )
             spk_emb = args.get('spk_emb')
             ref_codes = args.get('ref_codes')
+            if ref_codes is not None and ref_codes.shape[-1] > 150:
+                ref_codes = ref_codes[..., (ref_codes.shape[-1] - 150) // 2:]
+                ref_codes = ref_codes[..., :150]
+                args['ref_codes'] = ref_codes
             ref_len = ref_codes.shape[2] if ref_codes is not None else 0
             spk_reserve = 1 if spk_emb is not None else 0
+            if reserved and ref_len + (2 if ref_codes is not None else 0) + spk_reserve > reserved:
+                raise ValueError('Reference audio exceeds the configured condition prefix budget')
             ref_start = start_pos
             if self.config.use_talker_ref_boundaries and ref_codes is not None and start_pos - spk_reserve >= 2:
                 code_count = min(ref_len, start_pos - spk_reserve - 2)
@@ -1119,7 +1233,9 @@ class MiniQwenOmni(Qwen3ForCausalLM):
                 audio_buffer[:, 0, ref_start - 1] = self.audio_spk_token
 
         eos_ids = {eos_token_id} if isinstance(eos_token_id, int) else set(eos_token_id)
-        while input_ids.shape[1] < start_pos + max_new_tokens:
+        while input_ids.shape[1] < start_pos + talker_max_new_tokens:
+            if not text_finished and len(generated_tokens) >= thinker_max_new_tokens:
+                text_finished = True
             if return_audio_codes:
                 if past_kvs is None or not use_cache:
                     model_input = torch.cat((audio_buffer, input_ids.unsqueeze(1)), dim=1)
@@ -1128,6 +1244,8 @@ class MiniQwenOmni(Qwen3ForCausalLM):
             else:
                 model_input = input_ids if past_kvs is None or not use_cache else input_ids[:, -1:]
 
+            if reserved:
+                args['talker_attention_mask'] = (args['attention_mask'].bool() | audio_buffer.ne(self.audio_pad_token).any(dim=1)).long()
             out = self.forward(
                 model_input,
                 past_key_values=past_kvs,
@@ -1143,7 +1261,9 @@ class MiniQwenOmni(Qwen3ForCausalLM):
                 seen = list(set(input_ids[0].tolist()))
                 scores = text_logits[seen]
                 text_logits[seen] = torch.where(scores > 0, scores / rp, scores * rp)
-            text_token = self._sample_from_logits(text_logits, temperature, top_k, top_p)
+            text_token = self._sample_from_logits(
+                text_logits, temperature, top_k, top_p, do_sample=text_do_sample,
+            )
             if text_finished:
                 text_token = args.get('newline_token_id') if first_text_drain else args.get(
                     'pad_token_id', self.config.pad_token_id
@@ -1171,20 +1291,25 @@ class MiniQwenOmni(Qwen3ForCausalLM):
                 masked[self.audio_stop_token] = main_logits[self.audio_stop_token]
                 c0 = self._sample_from_logits(
                     masked,
-                    self.config.main_codec_temperature,
-                    self.config.main_codec_top_k,
-                    self.config.main_codec_top_p,
+                    main_audio_temperature,
+                    main_audio_top_k,
+                    main_audio_top_p,
+                    repetition_penalty=talker_repetition_penalty,
+                    history=audio_history,
+                    do_sample=talker_do_sample,
                 )
                 if c0 == self.audio_stop_token:
                     audio_finished = True
                 else:
+                    audio_history.append(int(c0))
                     audio_frame = self.talker.code_predictor.generate(
                         out.talker_hidden_states[:, -1],
                         torch.tensor([c0], dtype=torch.long, device=input_ids.device),
                         self._sample_from_logits,
-                        temperature=self.config.residual_codec_temperature,
-                        top_k=self.config.residual_codec_top_k,
-                        top_p=self.config.residual_codec_top_p,
+                        temperature=residual_audio_temperature,
+                        top_k=residual_audio_top_k,
+                        top_p=residual_audio_top_p,
+                        do_sample=talker_do_sample,
                     )
 
             if not text_finished and text_token in eos_ids:
@@ -1194,6 +1319,8 @@ class MiniQwenOmni(Qwen3ForCausalLM):
                 input_ids,
                 torch.tensor([[text_token]], dtype=torch.long, device=input_ids.device),
             ), dim=1)
+            if reserved:
+                args['attention_mask'] = F.pad(args['attention_mask'], (0, 1), value=1)
             if return_audio_codes:
                 next_audio = torch.full(
                     (1, 8, 1), self.audio_pad_token,

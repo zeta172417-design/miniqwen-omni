@@ -111,7 +111,7 @@ class MiniMind3OAdapter(ModelAdapter):
                 input_ids,
                 eos_token_id=self.tokenizer.eos_token_id,
                 max_new_tokens=min(self.max_new_tokens, int(sample.metadata.get("max_new_tokens", self.max_new_tokens))),
-                temperature=1.0, top_k=1, top_p=1.0,
+                temperature=0.85, top_k=50, top_p=0.85, do_sample=True,
                 stream=True,
                 return_audio_codes=self.return_audio and sample.metadata.get("require_audio", True),
                 open_thinking=False,

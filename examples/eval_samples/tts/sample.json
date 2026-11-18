@@ -1,0 +1,10 @@
+{
+  "task": "tts",
+  "sample_id": "tts-0010",
+  "prompt": "Read the following text exactly and do not add commentary:\nWhat I say is altogether on your own account.",
+  "reference": "What I say is altogether on your own account.",
+  "choices": [],
+  "v1_text": "What I say is altogether on your own account.",
+  "v1_audio_text": "",
+  "v1_audio": "v1_output.wav"
+}

@@ -22,6 +22,7 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import MimiModel
+from model.voice_conditioning import PRESET_VOICES, crop_reference_codes
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -58,7 +59,7 @@ class Runtime:
     dtype: torch.dtype
     max_audio_seconds: float
     models: dict[str, ModelRuntime] = field(default_factory=dict)
-    default_model: str = "v01"
+    default_model: str = "v1"
 
     def select_model(self, model_key: str | None = None) -> ModelRuntime:
         if self.models:
@@ -136,19 +137,21 @@ def require_dir(path: str, label: str) -> str:
 def load_voices() -> dict[str, dict[str, torch.Tensor]]:
     result: dict[str, dict[str, torch.Tensor]] = {}
     voice_dir = PROJECT_ROOT / "model" / "speaker"
-    for filename in ("voices.pt", "voices_unseen.pt"):
+    for filename in ("voices.pt",):
         path = voice_dir / filename
         if not path.is_file():
             continue
         values = torch.load(path, map_location="cpu")
         for name, voice in values.items():
+            if name not in PRESET_VOICES:
+                continue
             result.setdefault(name, voice)
     return result
 
 
 def load_runtime(args: argparse.Namespace) -> Runtime:
-    model_path = require_dir(args.model_path, "V0.1 checkpoint")
-    baseline_model_path = require_dir(args.baseline_model_path, "V0 checkpoint")
+    model_path = require_dir(args.model_path, "MiniQwen-Omni-V1 checkpoint")
+    baseline_model_path = require_dir(args.baseline_model_path, "MiniQwen-Omni-V1-Base checkpoint")
     audio_path = require_dir(args.audio_encoder, "SenseVoice")
     vision_path = require_dir(args.vision_model, "SigLIP2")
     mimi_path = require_dir(args.mimi_path, "Mimi")
@@ -175,8 +178,8 @@ def load_runtime(args: argparse.Namespace) -> Runtime:
         return ModelRuntime(label=label, model=model, tokenizer=tokenizer)
 
     models = {
-        "v01": load_core("v01", args.model_label, model_path),
-        "v0": load_core("v0", args.baseline_model_label, baseline_model_path),
+        "v1": load_core("v1", args.model_label, model_path),
+        "base": load_core("base", args.baseline_model_label, baseline_model_path),
     }
     model_class = get_omni_model_class("production")
     audio_encoder, audio_processor = model_class.load_sensevoice(audio_path)
@@ -229,7 +232,7 @@ def load_runtime(args: argparse.Namespace) -> Runtime:
         args.device,
         len(voices),
     )
-    default_bundle = models["v01"]
+    default_bundle = models["v1"]
     return Runtime(
         model=default_bundle.model,
         tokenizer=default_bundle.tokenizer,
@@ -240,7 +243,7 @@ def load_runtime(args: argparse.Namespace) -> Runtime:
         dtype=dtype,
         max_audio_seconds=args.max_audio_seconds,
         models=models,
-        default_model="v01",
+        default_model="v1",
     )
 
 
@@ -316,7 +319,7 @@ def voice_condition(runtime: Runtime, voice_name: str, selected: ModelRuntime | 
     voice = runtime.voices[voice_name]
     ref_codes = voice.get("ref_codes")
     if ref_codes is not None:
-        ref_codes = ref_codes.unsqueeze(0).to(runtime.device)
+        ref_codes = crop_reference_codes(ref_codes).unsqueeze(0).to(runtime.device)
     spk_emb = voice.get("spk_emb")
     if spk_emb is not None:
         selected = selected or runtime.select_model()
@@ -417,7 +420,10 @@ def stream_answer(
             temperature=temperature,
             top_p=top_p,
             top_k=50,
-            rp=1.05,
+            rp=1.0,
+            do_sample=False,
+            talker_do_sample=True,
+            talker_repetition_penalty=1.05,
             stream=True,
             use_cache=True,
             return_audio_codes=generate_audio,
@@ -780,16 +786,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MiniQwen-Omni password-protected Gradio server")
     parser.add_argument(
         "--model-path",
-        default=str(PROJECT_ROOT / "out/miniqwen_omni_full_main_codec_cp_v5/checkpoint"),
-        help="默认的新模型（V0.1 Main codec + Code Predictor）",
+        default=str(PROJECT_ROOT / "out/miniqwen_sft/last/checkpoint"),
+        help="默认的新模型（MiniQwen-Omni-V1 Main codec + Code Predictor）",
     )
     parser.add_argument(
         "--baseline-model-path",
-        default=str(PROJECT_ROOT / "out/miniqwen_omni_full/checkpoint"),
-        help="用于网页A/B切换的V0基线模型",
+        default=str(PROJECT_ROOT / "out/miniqwen_pretrain/tts/last/checkpoint"),
+        help="用于网页A/B切换的MiniQwen-Omni-V1-Base基线模型",
     )
-    parser.add_argument("--model-label", default="V0.1 · Main codec + Code Predictor")
-    parser.add_argument("--baseline-model-label", default="V0 · Parallel 8-code Talker")
+    parser.add_argument("--model-label", default="MiniQwen-Omni-V1 · Main codec + Code Predictor")
+    parser.add_argument("--baseline-model-label", default="MiniQwen-Omni-V1-Base · Pretrain checkpoint")
     parser.add_argument("--audio-encoder", default=str(PROJECT_ROOT / "model/SenseVoiceSmall"))
     parser.add_argument("--vision-model", default=str(PROJECT_ROOT / "model/siglip2-base-p32-256-ve"))
     parser.add_argument("--mimi-path", default=str(PROJECT_ROOT / "model/mimi"))

@@ -24,9 +24,14 @@ def load_asr(path: str, device: str = "cpu"):
 
 
 def transcribe(model, path: str) -> str:
-    import librosa
+    import soundfile as sf
+    import numpy as np
+    from scipy.signal import resample_poly
     from funasr.utils.postprocess_utils import rich_transcription_postprocess
-    waveform, _ = librosa.load(path, sr=16000, mono=True)
+    waveform, sample_rate = sf.read(path, dtype="float32", always_2d=True)
+    waveform = np.asarray(waveform).mean(axis=1)
+    if sample_rate != 16000:
+        waveform = resample_poly(waveform, 16000, sample_rate).astype("float32")
     result = model.generate(input=waveform, cache={}, language="en", use_itn=True, disable_pbar=True, disable_log=True)
     return rich_transcription_postprocess(result[0]["text"]).strip() if result else ""
 

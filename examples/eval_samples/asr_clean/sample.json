@@ -1,0 +1,10 @@
+{
+  "task": "asr_clean",
+  "sample_id": "asr-clean-0001",
+  "prompt": "Transcribe the speech exactly in English.",
+  "reference": "SIR MARCH SIXTEENTH",
+  "choices": [],
+  "v1_text": "SIR MARCH SIXTEENTH",
+  "v1_audio_text": "",
+  "input_audio": "input_audio.flac"
+}

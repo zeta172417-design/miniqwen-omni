@@ -4,8 +4,8 @@ set -euo pipefail
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 WORKSPACE=${OMNI_WORKSPACE:-/mnt/workspace/zhaozetao/multimodel/Omni}
 CONFIG=${OMNI_BENCH_CONFIG:-$PROJECT_ROOT/benchmark/configs/models.json}
-RUN_ID=${OMNI_BENCH_RUN_ID:-omni-benchmark-v0-standard-$(date -u +%Y%m%dT%H%M%SZ)}
-MODELS=${OMNI_BENCH_MODELS:-miniqwen-v0,miniqwen-v0.1,minimind-3o-moe,qwen2.5-omni-3b,mini-omni2}
+RUN_ID=${OMNI_BENCH_RUN_ID:-miniqwen-omni-v1-standard-$(date -u +%Y%m%dT%H%M%SZ)}
+MODELS=${OMNI_BENCH_MODELS:-miniqwen-v1-base,miniqwen-v1,minimind-3o-moe,qwen2.5-omni-3b,mini-omni2}
 OUTPUT_ROOT=${OMNI_BENCH_OUTPUT_ROOT:-$WORKSPACE/benchmark-results}
 ASR_MODEL=${OMNI_BENCH_ASR_MODEL:-$PROJECT_ROOT/model/SenseVoiceSmall}
 DEVICES=${OMNI_BENCH_DEVICES:-0,1,2,3}
@@ -24,7 +24,7 @@ QWEN_PYTHON=${QWEN_BENCH_PYTHON:-$DEFAULT_PYTHON}
 MINIOMNI_VENV=$WORKSPACE/mini-omni2/.venv/bin/python
 MINIOMNI_PYTHON=${MINIOMNI_BENCH_PYTHON:-$MINIOMNI_VENV}
 MINIOMNI_SOURCE=$WORKSPACE/mini-omni2/source
-MINIOMNI_DEPS=$PROJECT_ROOT/.runtime/mini_omni2_ppu_deps
+MINIOMNI_DEPS=$PROJECT_ROOT/.runtime/mini_omni2_gpu_deps
 SKIP_AUDIO_SCORING=0
 
 export TORCH_HOME=${TORCH_HOME:-$WORKSPACE/benchmark-cache/torch}
@@ -54,7 +54,7 @@ case "$RUN_MODE" in
     PROFILE=quick
     DATA_CONFIG=$PROJECT_ROOT/benchmark/configs/quick.json
     DATA_DIR=$WORKSPACE/benchmark-data/omni-core-v2.3-quick
-    RUN_ID=${OMNI_BENCH_RUN_ID:-omni-benchmark-v0-quick-$(date -u +%Y%m%dT%H%M%SZ)}
+    RUN_ID=${OMNI_BENCH_RUN_ID:-miniqwen-omni-v1-quick-$(date -u +%Y%m%dT%H%M%SZ)}
     ;;
   smoke)
     PROFILE=smoke
@@ -85,7 +85,7 @@ echo "Omni Benchmark $PROFILE | run=$RUN_ID | models=$(tr ',' ' ' <<< "$MODELS")
 echo "Detailed logs: $LOG_DIR"
 
 if [[ ! -x "$MINIOMNI_PYTHON" ]]; then
-  # Mini-Omni2 also runs with the project's PPU Python when its small set of
+  # Mini-Omni2 also runs with the project's GPU Python when its small set of
   # compatibility packages is isolated under .runtime.
   MINIOMNI_PYTHON=$DEFAULT_PYTHON
 fi
@@ -198,12 +198,12 @@ run_model_shard() {
   local device=$2
   local shard_index=$3
   local PYTHON_BIN MODEL_PYTHONPATH inference_batch=1
-  echo "Running $model shard $((shard_index + 1))/$NUM_SHARDS on PPU $device -> $RUN_ID"
+  echo "Running $model shard $((shard_index + 1))/$NUM_SHARDS on GPU $device -> $RUN_ID"
   case "$model" in
     mini-omni2)
       PYTHON_BIN=$MINIOMNI_PYTHON
       if [[ "$PYTHON_BIN" == "$DEFAULT_PYTHON" && ! -d "$MINIOMNI_DEPS/lightning" ]]; then
-        echo "Missing Mini-Omni2 PPU compatibility dependencies: $MINIOMNI_DEPS" >&2
+        echo "Missing Mini-Omni2 GPU compatibility dependencies: $MINIOMNI_DEPS" >&2
         exit 2
       fi
       MODEL_PYTHONPATH=$MINIOMNI_DEPS:$MINIOMNI_SOURCE${PYTHONPATH:+:$PYTHONPATH}
@@ -212,7 +212,7 @@ run_model_shard() {
       PYTHON_BIN=$QWEN_PYTHON
       MODEL_PYTHONPATH=${PYTHONPATH:-}
       ;;
-    miniqwen-v0.1)
+    miniqwen-v1)
       PYTHON_BIN=$MINIQWEN_PYTHON
       MODEL_PYTHONPATH=${PYTHONPATH:-}
       inference_batch=$BATCH_SIZE
@@ -286,7 +286,7 @@ score_model_shard() {
     utmos_args+=(--utmos-repo "$UTMOS_REPO")
   fi
   printf -v suffix 'shard-%02d-of-%02d' "$shard_index" "$NUM_SHARDS"
-  echo "Scoring $model $suffix on PPU $device"
+  echo "Scoring $model $suffix on GPU $device"
   env CUDA_VISIBLE_DEVICES="$device" \
     NUMBA_CACHE_DIR="$PROJECT_ROOT/.runtime/numba_cache" \
     "$MINIQWEN_PYTHON" -u "$PROJECT_ROOT/benchmark/evaluate_audio.py" \

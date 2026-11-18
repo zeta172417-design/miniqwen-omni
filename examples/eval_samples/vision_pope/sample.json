@@ -1,0 +1,13 @@
+{
+  "task": "vision_pope",
+  "sample_id": "vision-pope-0005",
+  "prompt": "Is there a fork in the image?\nA. Yes\nB. No\nAnswer with only the option letter.",
+  "reference": "A",
+  "choices": [
+    "Yes",
+    "No"
+  ],
+  "v1_text": "A",
+  "v1_audio_text": "",
+  "input_image": "input_image.jpg"
+}

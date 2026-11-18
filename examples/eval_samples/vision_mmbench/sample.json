@@ -1,0 +1,15 @@
+{
+  "task": "vision_mmbench",
+  "sample_id": "vision-mmbench-0000",
+  "prompt": "Which is right?\nA. The cat is running on the floor\nB. The cat is lying on the floor\nC. The cat is standing on the floor\nD. The cat is jumping on the floor\nAnswer with only the option letter.",
+  "reference": "B",
+  "choices": [
+    "The cat is running on the floor",
+    "The cat is lying on the floor",
+    "The cat is standing on the floor",
+    "The cat is jumping on the floor"
+  ],
+  "v1_text": "B",
+  "v1_audio_text": "",
+  "input_image": "input_image.jpg"
+}
