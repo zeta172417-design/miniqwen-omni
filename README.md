@@ -340,7 +340,7 @@ V1 在 clean 上接近 Qwen2.5-Omni-3B，在 other 上仍有差距，但明显�
 Transcribe the speech exactly in English.
 ```
 
-<audio controls preload="none" src="examples/eval_samples/asr_clean/input_audio.flac"></audio>
+<audio controls preload="none" src="https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/eval_samples/asr_clean/input_audio.flac"></audio>
 
 
 **样例（ASR other）**
@@ -350,7 +350,7 @@ Transcribe the speech exactly in English.
 Transcribe the speech exactly in English.
 ```
 
-<audio controls preload="none" src="examples/eval_samples/asr_other/input_audio.flac"></audio>
+<audio controls preload="none" src="https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/eval_samples/asr_other/input_audio.flac"></audio>
 
 
 ## Audio → Text QA
@@ -370,7 +370,7 @@ Transcribe the speech exactly in English.
 
 题目通过语音输入：
 
-<audio controls preload="none" src="examples/eval_samples/spoken_qa_a2t/input_audio.wav"></audio>
+<audio controls preload="none" src="https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/eval_samples/spoken_qa_a2t/input_audio.wav"></audio>
 
 V1 文本回答：`A`
 
@@ -395,7 +395,7 @@ Read the following text exactly and do not add commentary:
 What I say is altogether on your own account.
 ```
 
-<audio controls preload="none" src="examples/eval_samples/tts/v1_output.wav"></audio>
+<audio controls preload="none" src="https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/eval_samples/tts/v1_output.wav"></audio>
 
 
 ## MMBench-EN
@@ -488,7 +488,7 @@ V1 输出：`I want you for the army`
 
 题目通过语音输入：
 
-<audio controls preload="none" src="examples/eval_samples/audio_vision/input_audio.wav"></audio>
+<audio controls preload="none" src="https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/eval_samples/audio_vision/input_audio.wav"></audio>
 
 <img src="examples/eval_samples/audio_vision/input_image.jpg" width="360" height="240" alt="图像+语音输入">
 
@@ -541,10 +541,10 @@ V1 输出：`A`
 ```
 
 参考音频：
-<audio controls preload="none" src="examples/audio/clone/clone-5639-00-reference.flac"></audio>
+<audio controls preload="none" src="https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/audio/clone/clone-5639-00-reference.flac"></audio>
 
 V1 输出：
-<audio controls preload="none" src="examples/audio/clone/clone-5639-00-v1.wav"></audio>
+<audio controls preload="none" src="https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/audio/clone/clone-5639-00-v1.wav"></audio>
 
 Speaker cosine：`0.1568`
 
