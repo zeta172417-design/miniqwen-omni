@@ -8,11 +8,4 @@
 
 训练时只读取处理后的 Parquet；下载、清洗、编码、切分和验收代码统一放在 `data_pipeline/`。运行时读取器位于 `dataset/omni_dataset.py`、`dataset/sft_dataset.py` 和 `dataset/parquet_reader.py`。
 
-当前计划文件：
-
-```text
-raw/manifests/pretrain/plan.json
-raw/manifests/sft/plan.json
-```
-
-旧的三份主数据源和补充语音数据保留在 `raw/`，便于重新构建；不会在训练时直接读取压缩包或临时缓存。数据比例、来源和验收结果见 `reports/` 下的数据报告。
+新实例恢复时，优先运行 `scripts/download_modelscope_release.sh`，直接获取已验收的 Pretrain 和 SFT 数据。原始公开数据集只在需要重建数据时按 `README.md` 和 `PUBLISHING.md` 中的来源链接下载。
