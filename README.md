@@ -342,6 +342,8 @@ Transcribe the speech exactly in English.
 
 https://github.com/user-attachments/assets/1bcddf3b-69be-4e53-8c22-935b41d60698
 
+V1 转写：`SIR MARCH SIXTEENTH`
+
 
 
 **样例（ASR other）**
@@ -354,11 +356,13 @@ Transcribe the speech exactly in English.
 
 https://github.com/user-attachments/assets/fb9547b8-9688-4161-91e3-eb6bd629f5c0
 
+V1 转写：`ALMOST AT THIS INSTANT I HEARD A PISTOL SHOT IN THE BANK`
+
 
 
 ## Audio → Text QA
 
-这是语音问题到文本答案的多项选择任务，输入是 spoken question，输出只计文本答案。
+这是语音问题到文本答案的多项选择任务，输入是 spoken question，输出只计文本答案。标准评测中的 spoken question 由 Kokoro-82M 将题目文本合成为语音，用于固定输入条件。
 
 | 模型 | 正确率 ↑ |
 |---|---:|
