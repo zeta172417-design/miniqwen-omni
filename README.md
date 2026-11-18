@@ -340,7 +340,7 @@ Transcribe the speech exactly in English.
 ```
 
 
-https://github.com/user-attachments/assets/696772d4-7005-4602-8b1d-7f21e7342c93
+https://github.com/user-attachments/assets/90d2b0ec-2ee7-4640-8f43-37e4f1269771
 
 V1 转写：`SIR MARCH SIXTEENTH`
 
@@ -354,7 +354,7 @@ Transcribe the speech exactly in English.
 ```
 
 
-https://github.com/user-attachments/assets/ab9d1141-88a9-4b10-86ea-9c481ec845b6
+https://github.com/user-attachments/assets/125c8a2a-865a-49e3-8717-5aa454224f0f
 
 V1 转写：`ALMOST AT THIS INSTANT I HEARD A PISTOL SHOT IN THE BANK`
 
@@ -378,7 +378,7 @@ V1 转写：`ALMOST AT THIS INSTANT I HEARD A PISTOL SHOT IN THE BANK`
 题目通过语音输入：
 
 
-https://github.com/user-attachments/assets/d9e2bca4-25d7-41db-8b9e-6e5640886bae
+https://github.com/user-attachments/assets/e29f70ad-22d6-46f2-8500-b5cdb6fb1088
 
 
 V1 文本回答：`A`
@@ -405,16 +405,16 @@ What I say is altogether on your own account.
 ```
 
 
-https://github.com/user-attachments/assets/90d2b0ec-2ee7-4640-8f43-37e4f1269771
+https://github.com/user-attachments/assets/381ca461-fa08-4cc4-be26-81550a4354e4
 
 TTS 其他输出示例：
 
 - `v1-audio-answer.mp4`
-  https://github.com/user-attachments/assets/61b3900f-5466-4cff-860e-e137636034f8
+  https://github.com/user-attachments/assets/696772d4-7005-4602-8b1d-7f21e7342c93
 - `v1-base-tts.mp4`
-  https://github.com/user-attachments/assets/e29f70ad-22d6-46f2-8500-b5cdb6fb1088
+  https://github.com/user-attachments/assets/d9e2bca4-25d7-41db-8b9e-6e5640886bae
 - `v1-tts.mp4`
-  https://github.com/user-attachments/assets/381ca461-fa08-4cc4-be26-81550a4354e4
+  https://github.com/user-attachments/assets/61b3900f-5466-4cff-860e-e137636034f8
 
 
 ## MMBench-EN
@@ -508,7 +508,7 @@ V1 输出：`I want you for the army`
 题目通过语音输入：
 
 
-https://github.com/user-attachments/assets/494ec964-5cdb-47b9-ba82-5bece491a443
+https://github.com/user-attachments/assets/ab9d1141-88a9-4b10-86ea-9c481ec845b6
 
 
 <img src="examples/eval_samples/audio_vision/input_image.jpg" width="360" height="240" alt="图像+语音输入">
@@ -572,12 +572,12 @@ V1 输出：`A`
 
 参考音频：
 
-https://github.com/user-attachments/assets/40735bb5-d6fd-4ae7-a5d2-5066705e5d9f
+https://github.com/user-attachments/assets/494ec964-5cdb-47b9-ba82-5bece491a443
 
 
 V1 输出：
 
-https://github.com/user-attachments/assets/125c8a2a-865a-49e3-8717-5aa454224f0f
+https://github.com/user-attachments/assets/40735bb5-d6fd-4ae7-a5d2-5066705e5d9f
 
 
 Speaker cosine：`0.1568`
