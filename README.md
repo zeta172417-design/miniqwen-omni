@@ -278,7 +278,6 @@ Talker 使用 Main codec head 预测 Mimi c0，再由 Code Predictor 自回归�
 | SigLIP2 | 94.6M（外置） | vision encoder，冻结 |
 | Mimi | 96.2M（外置） | 8 codebooks，12.5 Hz，24 kHz，冻结 |
 | CAMPPlus | 6.9M（外置） | 192-d speaker embedding，作为条件输入 |
-| ERes2Net | 6.6M（外置） | speaker verification，可用于声音克隆评估 |
 
 # 🗃️ 数据集
 
@@ -340,7 +339,7 @@ V1 在 clean 上接近 Qwen2.5-Omni-3B，在 other 上仍有差距，但明显�
 Transcribe the speech exactly in English.
 ```
 
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/ba1cb3ea-3f65-46cb-9250-4245d81c1ee" type="video/mp4"></video>
+<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/1bcddf3b-69be-4e53-8c22-935b41d60698" type="video/mp4"></video>
 
 
 **样例（ASR other）**
@@ -350,7 +349,7 @@ Transcribe the speech exactly in English.
 Transcribe the speech exactly in English.
 ```
 
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/c79cc66b-b2d5-4d92-826b-a07903fbe20b" type="video/mp4"></video>
+<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/fb9547b8-9688-4161-91e3-eb6bd629f5c0" type="video/mp4"></video>
 
 
 ## Audio → Text QA
@@ -370,7 +369,7 @@ Transcribe the speech exactly in English.
 
 题目通过语音输入：
 
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/03827ec2-2c4b-4470-bd36-e865ffb74140" type="video/mp4"></video>
+<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/c2091d7f-6e75-436a-aa26-00f454a477ff" type="video/mp4"></video>
 
 V1 文本回答：`A`
 
@@ -395,7 +394,7 @@ Read the following text exactly and do not add commentary:
 What I say is altogether on your own account.
 ```
 
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/4714b9c4-3acf-4582-a970-1ef15dcba761" type="video/mp4"></video>
+<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/7e26fec7-ab60-45fa-a298-84c11db0ca41" type="video/mp4"></video>
 
 
 ## MMBench-EN
@@ -488,7 +487,7 @@ V1 输出：`I want you for the army`
 
 题目通过语音输入：
 
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/f22335eb-d2b9-48ad-9417-4a4a6f787591" type="video/mp4"></video>
+<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/1c207823-ec5c-4d6c-8eec-52dbe0f0718a" type="video/mp4"></video>
 
 <img src="examples/eval_samples/audio_vision/input_image.jpg" width="360" height="240" alt="图像+语音输入">
 
@@ -541,10 +540,10 @@ V1 输出：`A`
 ```
 
 参考音频：
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/c18b0650-cf49-4396-b2ee-fd387d02e286" type="video/mp4"></video>
+<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/f05718da-fe8a-45ff-8242-de28c2517675" type="video/mp4"></video>
 
 V1 输出：
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/013fe670-cccf-438b-a985-f334bb33fe89" type="video/mp4"></video>
+<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/cf55774b-76b7-4c67-b3cb-59bdd8fc78ab" type="video/mp4"></video>
 
 Speaker cosine：`0.1568`
 
@@ -590,6 +589,6 @@ python scripts/export_modelscope.py \
 
 # 🙏 许可证和致谢
 
-代码使用 Apache-2.0。Qwen3、SenseVoice、SigLIP2、Mimi、CAMPPlus、ERes2Net 和开源语料遵循各自上游许可证，使用和再发布时请保留原始作者与许可证信息。
+代码使用 Apache-2.0。Qwen3、SenseVoice、SigLIP2、Mimi、CAMPPlus 和开源语料遵循各自上游许可证，使用和再发布时请保留原始作者与许可证信息。
 
 本项目参考了 [MiniMind-O](https://github.com/jingyaogong/minimind-o) 的数据组织和训练接口，也参考了 [Qwen3-Omni](https://github.com/QwenLM/Qwen3-Omni) 的多模态序列与 Thinker–Talker 系统设计。项目使用 Qwen3-0.6B 作为 Thinker，并独立实现了适配 Mimi 8-codebook 输出的 Talker、Bridge 和音频条件模块。

@@ -18,9 +18,9 @@ The repository includes small playable WAV examples. Open the GitHub page and cl
 
 | Scenario | Input | Output |
 |---|---|---|
-| Unconditioned TTS | `This outward mutability indicated ...` | <video controls preload="metadata" width="640"><source src="https://github.com/user-attachments/assets/fd4df82d-6623-414e-bf87-c2664cb24c82" type="video/mp4"></video> |
-| Base unconditioned TTS | same text | <video controls preload="metadata" width="640"><source src="https://github.com/user-attachments/assets/e1cad318-bdbf-4b51-9696-45edd9acc918" type="video/mp4"></video> |
-| Spoken QA | `What is an example of a chemical reaction?` | <video controls preload="metadata" width="640"><source src="https://github.com/user-attachments/assets/6e0830c8-4a13-423d-84a5-3cc3ddb8cdca" type="video/mp4"></video> |
+| Unconditioned TTS | `This outward mutability indicated ...` | <video controls preload="metadata" width="640"><source src="https://github.com/user-attachments/assets/bd827474-95c5-45f4-bf82-d34fe5ebe6c7" type="video/mp4"></video> |
+| Base unconditioned TTS | same text | <video controls preload="metadata" width="640"><source src="https://github.com/user-attachments/assets/eccff22c-e4a6-4e23-a1bf-70c40ef857ea" type="video/mp4"></video> |
+| Spoken QA | `What is an example of a chemical reaction?` | <video controls preload="metadata" width="640"><source src="https://github.com/user-attachments/assets/ff3b3a9a-4593-462c-8328-454df5ff782a" type="video/mp4"></video> |
 
 Fallback links: [V1 TTS](https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/audio/v1-tts.wav) · [V1-Base TTS](https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/audio/v1-base-tts.wav) · [V1 spoken QA](https://raw.githubusercontent.com/zeta172417-design/miniqwen-omni/main/examples/audio/v1-audio-answer.wav).
 
@@ -69,7 +69,7 @@ Image ─ SigLIP2 ────┘              │
 - Frozen SenseVoice audio encoder with a 512 → 1024 projector.
 - Frozen SigLIP2 vision encoder with a 768 → 1024 projector and 64 image tokens per image.
 - Six-layer, 768-wide Talker; Main head predicts c0 and Code Predictor autoregressively predicts c1–c7.
-- External frozen weights are approximately SenseVoice 234.0M, SigLIP2 94.6M, Mimi 96.2M, CAMPPlus 6.9M, and ERes2Net 6.6M.
+- External frozen weights are approximately SenseVoice 234.0M, SigLIP2 94.6M, Mimi 96.2M, CAMPPlus 6.9M.
 
 ## Quick start
 
@@ -99,7 +99,7 @@ huggingface-cli download kyutai/mimi --local-dir /tmp/mimi
 modelscope download --model iic/speech_campplus_sv_zh-cn_16k-common --local_dir model/campplus
 ```
 
-Keep auxiliary models in `model/Qwen3-0.6B`, `model/SenseVoiceSmall`, `model/siglip2-base-p32-256-ve`, and `model/mimi`. Reference cloning additionally needs CAMPPlus/ERes2Net and preset voices.
+Keep auxiliary models in `model/Qwen3-0.6B`, `model/SenseVoiceSmall`, `model/siglip2-base-p32-256-ve`, and `model/mimi`. Reference cloning additionally needs CAMPPlus and preset voices. ERes2Net is only needed for optional speaker-similarity evaluation.
 
 The inference modes are `0=text`, `1=multi-turn`, `2=audio`, `3=clone`, `4=image`, `5=mix`, and `-1=all`. Without a reference voice the model uses its native voice; reference audio is supported up to about 12 seconds.
 
