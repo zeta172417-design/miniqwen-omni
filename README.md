@@ -339,7 +339,9 @@ V1 在 clean 上接近 Qwen2.5-Omni-3B，在 other 上仍有差距，但明显�
 Transcribe the speech exactly in English.
 ```
 
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/1bcddf3b-69be-4e53-8c22-935b41d60698" type="video/mp4"></video>
+
+https://github.com/user-attachments/assets/1bcddf3b-69be-4e53-8c22-935b41d60698
+
 
 
 **样例（ASR other）**
@@ -349,7 +351,9 @@ Transcribe the speech exactly in English.
 Transcribe the speech exactly in English.
 ```
 
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/fb9547b8-9688-4161-91e3-eb6bd629f5c0" type="video/mp4"></video>
+
+https://github.com/user-attachments/assets/fb9547b8-9688-4161-91e3-eb6bd629f5c0
+
 
 
 ## Audio → Text QA
@@ -369,7 +373,9 @@ Transcribe the speech exactly in English.
 
 题目通过语音输入：
 
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/c2091d7f-6e75-436a-aa26-00f454a477ff" type="video/mp4"></video>
+
+https://github.com/user-attachments/assets/c2091d7f-6e75-436a-aa26-00f454a477ff
+
 
 V1 文本回答：`A`
 
@@ -394,7 +400,9 @@ Read the following text exactly and do not add commentary:
 What I say is altogether on your own account.
 ```
 
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/7e26fec7-ab60-45fa-a298-84c11db0ca41" type="video/mp4"></video>
+
+https://github.com/user-attachments/assets/7e26fec7-ab60-45fa-a298-84c11db0ca41
+
 
 
 ## MMBench-EN
@@ -487,7 +495,9 @@ V1 输出：`I want you for the army`
 
 题目通过语音输入：
 
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/1c207823-ec5c-4d6c-8eec-52dbe0f0718a" type="video/mp4"></video>
+
+https://github.com/user-attachments/assets/1c207823-ec5c-4d6c-8eec-52dbe0f0718a
+
 
 <img src="examples/eval_samples/audio_vision/input_image.jpg" width="360" height="240" alt="图像+语音输入">
 
@@ -540,10 +550,14 @@ V1 输出：`A`
 ```
 
 参考音频：
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/f05718da-fe8a-45ff-8242-de28c2517675" type="video/mp4"></video>
+
+https://github.com/user-attachments/assets/f05718da-fe8a-45ff-8242-de28c2517675
+
 
 V1 输出：
-<video controls preload="none" width="640"><source src="https://github.com/user-attachments/assets/cf55774b-76b7-4c67-b3cb-59bdd8fc78ab" type="video/mp4"></video>
+
+https://github.com/user-attachments/assets/cf55774b-76b7-4c67-b3cb-59bdd8fc78ab
+
 
 Speaker cosine：`0.1568`
 
